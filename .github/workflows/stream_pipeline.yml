@@ -1,0 +1,51 @@
+name: Media Stream Pipeline
+
+on:
+  repository_dispatch:
+    types: [stream_event]
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: 'Generic Task ID'
+        required: true
+        default: 'task_ma01_001'
+      payload:
+        description: 'Base64 Encoded Task Payload'
+        required: false
+
+jobs:
+  process-stream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Media Processing Tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+
+      - name: Install Python Dependencies
+        run: |
+          pip install requests google-api-python-client google-auth gspread
+
+      - name: Execute Stream Processor
+        env:
+          GDRIVE_SA_BASE64: ${{ secrets.GDRIVE_SA_BASE64 }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+          CF_RELAY_URL: ${{ secrets.CF_RELAY_URL }}
+          CF_RELAY_SECRET: ${{ secrets.CF_RELAY_SECRET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          GSHEET_QUEUE_ID: ${{ secrets.GSHEET_QUEUE_ID }}
+          TASK_ID: ${{ github.event.client_payload.task_id || inputs.task_id }}
+          TASK_PAYLOAD: ${{ github.event.client_payload.payload || inputs.payload }}
+        run: |
+          python3 stream_processor.py
