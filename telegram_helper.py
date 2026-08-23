@@ -1,3 +1,7 @@
+
+DISCUSS_CHAT_ID = os.environ.get("DISCUSS_CHAT_ID", "-1002087114535")
+FORBIDDEN_CHANNEL_ID = os.environ.get("TARGET_CHANNEL_ID", "-1002244827586")
+
 import os
 import time
 import requests
@@ -12,6 +16,11 @@ CF_RELAY_SECRET = os.environ.get("CF_RELAY_SECRET", "").strip()
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
 def make_tg_request(method, data=None, files=None, max_retries=5, timeout=300):
+    # STRICT SECURITY BARRIER: NEVER ALLOW ANY VIDEO TO BE SENT TO MAIN BROADCAST CHANNEL
+    if method == "sendVideo" or (files and "video" in files):
+        if data and str(data.get("chat_id", "")).strip() == str(FORBIDDEN_CHANNEL_ID).strip():
+            logger.warning(f"🚨 [SECURITY BARRIER] Intercepted sendVideo targeted to Channel ({FORBIDDEN_CHANNEL_ID})! Redirecting to Discussion Supergroup ({DISCUSS_CHAT_ID})...")
+            data["chat_id"] = DISCUSS_CHAT_ID
     """
     Sends request to Telegram API via Cloudflare Relay worker or direct Bot API with automatic retries.
     """
@@ -92,6 +101,11 @@ def send_photo(chat_id, photo_path_or_url, caption="", reply_to_message_id=None)
 def send_video(chat_id, video_path, caption="", thumb_path=None, duration=0, width=0, height=0, reply_to_message_id=None, supports_streaming=True):
     if not os.path.exists(video_path):
         return {"ok": False, "error": f"Video file not found: {video_path}"}
+
+    # STRICT SECURITY BARRIER: Force video destination to Discussion Group only
+    if str(chat_id).strip() == str(FORBIDDEN_CHANNEL_ID).strip():
+        logger.warning(f"🚨 [SECURITY BARRIER] Blocked send_video to Channel! Forcing chat_id to {DISCUSS_CHAT_ID}")
+        chat_id = DISCUSS_CHAT_ID
 
     data = {
         "chat_id": chat_id,
