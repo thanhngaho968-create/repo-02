@@ -28,7 +28,8 @@ def make_tg_request(method, data=None, files=None, max_retries=5, timeout=300):
     for attempt in range(1, max_retries + 1):
         # 1. Try Cloudflare Relay Worker if configured
         if CF_RELAY_URL:
-            url = f"{CF_RELAY_URL.rstrip("/")}/relay/{method}"
+            base_relay = CF_RELAY_URL.rstrip("/")
+            url = f"{base_relay}/relay/{method}"
             headers = {"X-Relay-Secret": CF_RELAY_SECRET} if CF_RELAY_SECRET else {}
             try:
                 res = requests.post(url, headers=headers, data=data, files=files, timeout=timeout)
@@ -39,7 +40,8 @@ def make_tg_request(method, data=None, files=None, max_retries=5, timeout=300):
                     
                     err_desc = res_json.get("description", "").lower()
                     if res_json.get("error_code") == 400 and ("message to be replied not found" in err_desc or "reply_to_message" in err_desc):
-                        logger.warning(f"⚠️ [Self-Healing] reply_to_message_id not found in {data.get("chat_id")}! Stripping reply ID and reposting directly...")
+                        target_chat = data.get("chat_id") if data else "target"
+                        logger.warning(f"⚠️ [Self-Healing] reply_to_message_id not found in {target_chat}! Stripping reply ID and reposting directly...")
                         if data and "reply_to_message_id" in data:
                             del data["reply_to_message_id"]
                             return make_tg_request(method, data=data, files=files, max_retries=max_retries - attempt + 1, timeout=timeout)
@@ -70,7 +72,8 @@ def make_tg_request(method, data=None, files=None, max_retries=5, timeout=300):
                     
                     err_desc = res_json.get("description", "").lower()
                     if res_json.get("error_code") == 400 and ("message to be replied not found" in err_desc or "reply_to_message" in err_desc):
-                        logger.warning(f"⚠️ [Self-Healing Direct] reply_to_message_id not found in {data.get("chat_id")}! Stripping reply ID and reposting directly...")
+                        target_chat = data.get("chat_id") if data else "target"
+                        logger.warning(f"⚠️ [Self-Healing Direct] reply_to_message_id not found in {target_chat}! Stripping reply ID and reposting directly...")
                         if data and "reply_to_message_id" in data:
                             del data["reply_to_message_id"]
                             return make_tg_request(method, data=data, files=files, max_retries=max_retries - attempt + 1, timeout=timeout)
