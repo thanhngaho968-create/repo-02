@@ -15,12 +15,18 @@ CF_RELAY_URL = os.environ.get("CF_RELAY_URL", "https://telegram-command-edge.hot
 CF_RELAY_SECRET = os.environ.get("CF_RELAY_SECRET", "HaRiSecret_2026_SecureRelay").strip()
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
-def make_tg_request(method, data=None, files=None, max_retries=5, timeout=300):
+def make_tg_request(method, data=None, files=None, max_retries=8, timeout=300):
     # GATEKEEPER 2: ZERO VIDEO FILES IN CHANNEL BARRIER
     if method == "sendVideo" or (files and ("video" in files or "thumbnail" in files)):
         if data and str(data.get("chat_id", "")).strip() == str(FORBIDDEN_CHANNEL_ID):
             logger.warning(f"🚨 [GATEKEEPER 2 INTERCEPTED] sendVideo to Channel ({FORBIDDEN_CHANNEL_ID}) blocked! Redirected to Discussion Supergroup ({DISCUSS_CHAT_ID}).")
             data["chat_id"] = DISCUSS_CHAT_ID
+
+        # GATEKEEPER 4: ZERO-STRAY BARRIER (Refuse video upload into supergroup without reply_to_message_id)
+        if data and str(data.get("chat_id", "")).strip() == str(DISCUSS_CHAT_ID):
+            if not data.get("reply_to_message_id"):
+                logger.error(f"❌ [GATEKEEPER 4 ZERO-STRAY BARRIER] Refusing sendVideo to Supergroup root without reply_to_message_id!")
+                return {"ok": False, "error": "zero_stray_barrier_root_upload_forbidden"}
 
     for attempt in range(1, max_retries + 1):
         if CF_RELAY_URL:
@@ -41,8 +47,8 @@ def make_tg_request(method, data=None, files=None, max_retries=5, timeout=300):
 
                     if res_json.get("error_code") == 429:
                         retry_after = res_json.get("parameters", {}).get("retry_after", 5)
-                        logger.warning(f"Telegram Rate Limit (429). Sleeping {retry_after}s...")
-                        time.sleep(retry_after)
+                        logger.warning(f"Telegram Rate Limit (429). Sleeping {retry_after + 2}s... (Attempt {attempt}/{max_retries})")
+                        time.sleep(retry_after + 2)
                         continue
 
                     logger.warning(f"[Relay Attempt {attempt}/{max_retries}] API Error on {method}: {res_json}")
@@ -69,8 +75,8 @@ def make_tg_request(method, data=None, files=None, max_retries=5, timeout=300):
 
                     if res_json.get("error_code") == 429:
                         retry_after = res_json.get("parameters", {}).get("retry_after", 5)
-                        logger.warning(f"Telegram Rate Limit (429). Sleeping {retry_after}s...")
-                        time.sleep(retry_after)
+                        logger.warning(f"Telegram Rate Limit (429). Sleeping {retry_after + 2}s... (Attempt {attempt}/{max_retries})")
+                        time.sleep(retry_after + 2)
                         continue
                     logger.warning(f"[Direct TG Attempt {attempt}/{max_retries}] API Error on {method}: {res_json}")
                 except Exception:
@@ -79,7 +85,7 @@ def make_tg_request(method, data=None, files=None, max_retries=5, timeout=300):
                 logger.warning(f"[Direct TG Attempt {attempt}/{max_retries}] Exception on {method}: {e}")
 
         if attempt < max_retries:
-            time.sleep(3 * attempt)
+            time.sleep(2 * attempt + 1)
 
     return {"ok": False, "error": f"Failed {method} after {max_retries} attempts"}
 
