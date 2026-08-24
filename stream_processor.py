@@ -504,6 +504,7 @@ def generate_video_thumb(video_path, thumb_path, timestamp=2.0):
 def split_video_lossless(input_mp4, output_dir, max_bytes=MAX_CHUNK_BYTES):
     """
     Splits video into streamable parts <= 45MB using FFmpeg lossless stream copy.
+    Automatically sub-slices any segments that exceed 45MB due to VBR bitrate spikes.
     """
     os.makedirs(output_dir, exist_ok=True)
     file_size = os.path.getsize(input_mp4)
@@ -516,11 +517,9 @@ def split_video_lossless(input_mp4, output_dir, max_bytes=MAX_CHUNK_BYTES):
         return [input_mp4]
 
     num_parts = math.ceil(file_size / max_bytes)
-    segment_duration = int(duration / num_parts)
-    if segment_duration < 1:
-        segment_duration = 1
+    segment_duration = max(30, int(duration / num_parts))
 
-    out_pattern = os.path.join(output_dir, "part_%03d.mp4")
+    out_pattern = os.path.join(output_dir, "init_part_%03d.mp4")
     cmd = [
         "ffmpeg", "-y",
         "-i", input_mp4,
@@ -531,17 +530,60 @@ def split_video_lossless(input_mp4, output_dir, max_bytes=MAX_CHUNK_BYTES):
         "-reset_timestamps", "1",
         out_pattern
     ]
-    logger.info(f"✂️ Slicing video into ~{segment_duration}s streaming segments ({num_parts} parts)...")
+    logger.info(f"✂️ Slicing video into ~{segment_duration}s streaming segments (target <= {max_bytes / (1024*1024):.1f} MB)...")
     subprocess.run(cmd, capture_output=True)
 
-    parts = sorted([
+    initial_parts = sorted([
         os.path.join(output_dir, f)
         for f in os.listdir(output_dir)
-        if f.startswith("part_") and f.endswith(".mp4") and os.path.getsize(os.path.join(output_dir, f)) > 1024
+        if f.startswith("init_part_") and f.endswith(".mp4") and os.path.getsize(os.path.join(output_dir, f)) > 1024
     ])
-    if parts:
-        return parts
-    return [input_mp4]
+
+    final_parts = []
+    part_counter = 1
+    for init_p in initial_parts:
+        p_sz = os.path.getsize(init_p)
+        if p_sz <= max_bytes:
+            dest_p = os.path.join(output_dir, f"part_{part_counter:03d}.mp4")
+            os.rename(init_p, dest_p)
+            final_parts.append(dest_p)
+            part_counter += 1
+        else:
+            logger.warning(f"⚠️ Part {init_p} is {p_sz / (1024*1024):.1f} MB > {max_bytes / (1024*1024):.1f} MB, sub-slicing...")
+            sub_meta = get_video_meta(init_p)
+            sub_dur = sub_meta.get("duration", 0)
+            sub_num = math.ceil(p_sz / (max_bytes * 0.85))
+            sub_seg_dur = max(20, int(sub_dur / sub_num)) if sub_dur > 0 else 60
+
+            sub_pattern = os.path.join(output_dir, f"sub_{part_counter}_%03d.mp4")
+            sub_cmd = [
+                "ffmpeg", "-y",
+                "-i", init_p,
+                "-c", "copy",
+                "-map", "0",
+                "-segment_time", str(sub_seg_dur),
+                "-f", "segment",
+                "-reset_timestamps", "1",
+                sub_pattern
+            ]
+            subprocess.run(sub_cmd, capture_output=True)
+            try:
+                os.remove(init_p)
+            except Exception:
+                pass
+
+            subs = sorted([
+                os.path.join(output_dir, f)
+                for f in os.listdir(output_dir)
+                if f.startswith(f"sub_{part_counter}_") and f.endswith(".mp4") and os.path.getsize(os.path.join(output_dir, f)) > 1024
+            ])
+            for s in subs:
+                dest_p = os.path.join(output_dir, f"part_{part_counter:03d}.mp4")
+                os.rename(s, dest_p)
+                final_parts.append(dest_p)
+                part_counter += 1
+
+    return final_parts
 
 def process_single_stream(stream_url, work_dir, title, code, ep_num, total_eps, chat_id, post_id, folder_id, owner_email):
     """
