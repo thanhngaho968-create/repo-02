@@ -1,5 +1,9 @@
 name: Media Stream Pipeline
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.client_payload.task_id || inputs.task_id }}
+  cancel-in-progress: false
+
 on:
   repository_dispatch:
     types: [stream_event]
