@@ -361,8 +361,6 @@ def download_and_merge_m3u8(stream_url, output_mp4, referer="https://javplayer.c
         '-N', '16',
         '--add-header', f'Referer: {referer}',
         '--add-header', f'User-Agent: {HEADERS["User-Agent"]}',
-        '--downloader', 'ffmpeg',
-        '--downloader-args', 'ffmpeg:-protocol_whitelist file,http,https,tcp,tls,crypto',
         '-o', output_mp4,
         stream_url
     ]
