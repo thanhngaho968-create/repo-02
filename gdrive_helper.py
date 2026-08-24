@@ -163,7 +163,6 @@ def upload_file_to_drive(local_path, file_name, parent_folder_id=None, mime_type
             if valid_files:
                 primary = valid_files[0]
                 logger.info(f"⚡ [DEDUPLICATION SHIELD] File '{file_name}' already exists on GDrive (ID: {primary['id']}). Skipping upload!")
-                # Trash redundant duplicate copies if any
                 if len(valid_files) > 1:
                     for extra in valid_files[1:]:
                         try:
@@ -190,7 +189,6 @@ def upload_file_to_drive(local_path, file_name, parent_folder_id=None, mime_type
         file_id = file_obj["id"]
         logger.info(f"✅ Uploaded '{file_name}' to GDrive (ID: {file_id})")
 
-        # Share / grant writer permissions
         target_email = owner_email or DEFAULT_OWNER_EMAIL
         if target_email:
             try:
