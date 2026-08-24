@@ -123,6 +123,8 @@ def send_photo(chat_id, photo_path_or_url, caption="", reply_to_message_id=None)
 def send_video(chat_id, video_path, caption="", thumb_path=None, duration=0, width=0, height=0, reply_to_message_id=None, supports_streaming=True):
     if not os.path.exists(video_path):
         return {"ok": False, "error": f"Video file not found: {video_path}"}
+    if os.path.getsize(video_path) == 0:
+        return {"ok": False, "error": f"Video file is empty (0 bytes): {video_path}"}
 
     if str(chat_id).strip() == str(FORBIDDEN_CHANNEL_ID):
         logger.warning(f"🚨 [GATEKEEPER 2 BARRIER] Intercepted send_video to Channel! Forcing chat_id to {DISCUSS_CHAT_ID}")
