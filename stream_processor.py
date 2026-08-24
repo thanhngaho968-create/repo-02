@@ -1,15 +1,3 @@
-"""
-stream_processor.py - High-Performance Lossless HLS Stream Processor for Actress Pipeline
-Features:
-- Dual-Engine HLS Capture: 16-worker yt-dlp acceleration with FFmpeg stream copy fallback
-- Anti-Bot Referer & Protocol Whitelisting (-protocol_whitelist, -allowed_extensions ALL)
-- Lossless Stream Copying with AAC ADTS bitstream repair (-bsf:a aac_adtstoasc)
-- Strict <= 45MB Lossless Chunk Slicing with VBR headroom and recursive safety re-split
-- 1280x720 HD JPEG Thumbnail Extraction with aspect ratio pad filtering
-- Google Drive 5TB OAuth2 Personal Quota Master MP4 Storage
-- Sequential Multi-Episode Telegram Discussion Comment Delivery
-"""
-
 import os
 import sys
 import time
@@ -39,7 +27,10 @@ TASK_ID = os.environ.get("TASK_ID", "task_stream_001")
 TASK_PAYLOAD = os.environ.get("TASK_PAYLOAD", "")
 DRIVE_ROOT = os.environ.get("GDRIVE_FOLDER_ID", "1AD83FFKXHHc-0NGK4boRv1jCcbUCRJn7")
 DEFAULT_OWNER_EMAIL = os.environ.get("OWNER_EMAIL", "hothihuong113@gmail.com")
-MAX_CHUNK_BYTES = 45 * 1024 * 1024  # Strict 45 MB chunk limit (safely under Telegram 50MB limit)
+MAX_CHUNK_BYTES = 45 * 1024 * 1024  # 45 MB per video part (Strictly <= 50MB for Telegram API)
+
+CHANNEL_ID = os.environ.get("TARGET_CHANNEL_ID", "-1002244827586")
+DISCUSS_CHAT_ID = os.environ.get("DISCUSS_CHAT_ID", "-1002087114535")
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -63,25 +54,21 @@ def parse_payload():
     """
     Parses base64 JSON payload or environment variables.
     """
-    curr_task_id = os.environ.get("TASK_ID", TASK_ID)
-    curr_payload = os.environ.get("TASK_PAYLOAD", TASK_PAYLOAD)
-
     data = {
-        "task_id": curr_task_id,
-        "title": curr_task_id,
+        "task_id": TASK_ID,
+        "title": TASK_ID,
         "code": "",
         "url": "",
         "m3u8_url": "",
         "chat_id": os.environ.get("CHAT_ID", ""),
         "post_id": os.environ.get("POST_ID", ""),
         "folder_id": DRIVE_ROOT,
-        "owner_email": DEFAULT_OWNER_EMAIL,
-        "episodes": []
+        "owner_email": DEFAULT_OWNER_EMAIL
     }
 
-    if curr_payload:
+    if TASK_PAYLOAD:
         try:
-            payload_str = curr_payload.strip()
+            payload_str = TASK_PAYLOAD.strip()
             missing_padding = len(payload_str) % 4
             if missing_padding:
                 payload_str += '=' * (4 - missing_padding)
@@ -89,25 +76,20 @@ def parse_payload():
                 decoded = base64.b64decode(payload_str).decode("utf-8")
                 parsed = json.loads(decoded)
             except Exception:
-                parsed = json.loads(curr_payload)
+                parsed = json.loads(TASK_PAYLOAD)
 
             data.update(parsed)
         except Exception as e:
             logger.warning(f"⚠️ Payload parsing fallback: {e}")
 
-    # Canonicalize aliases
-    if not data.get("code"):
-        data["code"] = data.get("movie_code") or ""
     if not data.get("url"):
-        data["url"] = data.get("stream_url") or data.get("m3u8_url") or data.get("page_url") or data.get("video_url") or data.get("embed_url") or os.environ.get("STREAM_URL", "")
+        data["url"] = data.get("m3u8_url") or data.get("page_url") or data.get("video_url") or data.get("embed_url") or os.environ.get("STREAM_URL", "")
     if not data.get("chat_id"):
-        data["chat_id"] = data.get("telegram_chat_id") or data.get("channel_id") or data.get("comment_chat_id") or os.environ.get("CHAT_ID", "")
+        data["chat_id"] = data.get("channel_id") or data.get("comment_chat_id") or os.environ.get("CHAT_ID", "")
     if not data.get("post_id"):
-        data["post_id"] = data.get("thread_msg_id") or data.get("message_id") or data.get("reply_to_message_id") or data.get("comment_reply_id") or os.environ.get("POST_ID", "")
+        data["post_id"] = data.get("message_id") or data.get("reply_to_message_id") or data.get("comment_reply_id") or os.environ.get("POST_ID", "")
     if not data.get("folder_id"):
-        data["folder_id"] = data.get("gdrive_folder_id") or DRIVE_ROOT
-    if not data.get("owner_email"):
-        data["owner_email"] = DEFAULT_OWNER_EMAIL
+        data["folder_id"] = DRIVE_ROOT
 
     return data
 
@@ -115,7 +97,7 @@ def is_123av_url(url):
     if not url:
         return False
     u_lower = url.lower()
-    return any(d in u_lower for d in ["123av.", "missav.", "javplayer.cc"])
+    return any(d in u_lower for d in ["123av", "missav", "javplayer", "jav"])
 
 def fetch_123av_page(url):
     """
@@ -131,7 +113,7 @@ def fetch_123av_page(url):
 
     urls_to_try = []
     if canonical_path:
-        for mirror in ['123av.top', '123av.me']:
+        for mirror in ['123av.top', '123av.me', '123av.org', '123av.com']:
             urls_to_try.append(f"https://{mirror}{canonical_path}")
 
     for mirror in ['123av.top', '123av.me', '123av.org', '123av.com']:
@@ -143,7 +125,6 @@ def fetch_123av_page(url):
         urls_to_try.append(url)
 
     for target_url in urls_to_try:
-        # Layer 1: cloudscraper
         if cloudscraper:
             try:
                 scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "desktop": True})
@@ -153,7 +134,6 @@ def fetch_123av_page(url):
             except Exception:
                 pass
 
-        # Layer 2: standard requests
         try:
             r = requests.get(target_url, headers=HEADERS, timeout=15)
             if r.status_code == 200 and ("x-data" in r.text or "player(" in r.text or "<html" in r.text.lower()):
@@ -253,6 +233,61 @@ def scrape_123av_details(video_url):
         logger.error(f"Error scraping 123av details: {e}")
         return {"error": str(e)}
 
+def update_gsheet_row(row_index, title=None, post_id=None, drive_link=None, status="Completed"):
+    """
+    Updates Google Sheet Adult_18Plus tab directly from GitHub Actions runner.
+    """
+    if not row_index:
+        return False
+    sheet_id = os.environ.get("GSHEET_QUEUE_ID", "1qCYT9HV99mTkwyjL4EemqLeIGg_rZpKw0wH0yLl1IEQ")
+    sa_b64 = os.environ.get("GDRIVE_SA_BASE64", "")
+    oauth_b64 = os.environ.get("GDRIVE_OAUTH_BASE64", "")
+    try:
+        import gspread
+        from google.oauth2 import service_account
+        from google.oauth2.credentials import Credentials
+
+        creds = None
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive"
+        ]
+        if sa_b64:
+            try:
+                sa_info = json.loads(base64.b64decode(sa_b64).decode("utf-8"))
+                creds = service_account.Credentials.from_service_account_info(sa_info, scopes=scopes)
+            except Exception:
+                pass
+        if not creds and oauth_b64:
+            try:
+                user_info = json.loads(base64.b64decode(oauth_b64).decode("utf-8"))
+                creds = Credentials.from_authorized_user_info(user_info, scopes=scopes)
+            except Exception:
+                pass
+
+        if not creds:
+            logger.warning("⚠️ No Google Sheet credentials available.")
+            return False
+
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(sheet_id)
+        ws = sh.worksheet("Adult_18Plus")
+
+        if title:
+            ws.update_cell(row_index, 4, str(title))
+        if status:
+            ws.update_cell(row_index, 6, str(status))
+        if post_id:
+            ws.update_cell(row_index, 7, str(post_id))
+        if drive_link:
+            ws.update_cell(row_index, 8, str(drive_link))
+
+        logger.info(f"✅ Updated Google Sheet row #{row_index}: status={status}, post_id={post_id}")
+        return True
+    except Exception as e:
+        logger.warning(f"⚠️ GSheet update warning: {e}")
+        return False
+
 def get_stream_m3u8_url(embed_url):
     """
     Fetches real .m3u8 stream URL from javplayer.cc embed URL.
@@ -302,62 +337,98 @@ def get_stream_m3u8_url(embed_url):
 
 def download_and_merge_m3u8(stream_url, output_mp4, referer="https://javplayer.cc/"):
     """
-    Downloads HLS stream with 16-worker multi-threaded yt-dlp and FFmpeg stream copy fallback.
+    Downloads HLS stream with robust FFmpeg stream copy and yt-dlp.
     """
     logger.info(f"📥 Downloading stream to {output_mp4}...")
     
-    # 1. Primary multi-threaded yt-dlp download (-N 16)
-    logger.info("🚀 Attempting multi-threaded yt-dlp download (-N 16)...")
-    ytdlp_cmd = [
-        'yt-dlp',
-        '--add-header', f'Referer: {referer}',
-        '--add-header', f'User-Agent: {HEADERS["User-Agent"]}',
-        '-N', '16',
-        '--downloader-args', 'ffmpeg:-protocol_whitelist file,http,https,tcp,tls,crypto',
-        '--force-overwrites',
-        '-o', output_mp4,
-        stream_url
-    ]
-    try:
-        res = subprocess.run(ytdlp_cmd, capture_output=True, text=True)
-        if os.path.exists(output_mp4) and os.path.getsize(output_mp4) > 1024 * 100:
-            logger.info(f"✅ yt-dlp download success: {format_bytes(os.path.getsize(output_mp4))}")
-            return True
-        else:
-            logger.warning(f"⚠️ yt-dlp failed or incomplete: {res.stderr[-300:] if res.stderr else 'No output'}")
-    except Exception as e:
-        logger.warning(f"⚠️ yt-dlp execution exception: {e}")
-
-    # 2. Secondary fast FFmpeg stream copy with full protocol whitelist & ADTS repair
-    logger.info("🔄 Falling back to FFmpeg HLS stream copy...")
     ffmpeg_cmd = [
         'ffmpeg', '-y',
         '-headers', f'Referer: {referer}\r\nUser-Agent: {HEADERS["User-Agent"]}\r\n',
         '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
-        '-allowed_extensions', 'ALL',
         '-i', stream_url,
         '-c', 'copy',
         '-bsf:a', 'aac_adtstoasc',
-        '-avoid_negative_ts', 'make_zero',
-        '-reset_timestamps', '1',
         output_mp4
     ]
     try:
+        logger.info("  Executing FFmpeg stream copy...")
         res = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
         if res.returncode == 0 and os.path.exists(output_mp4) and os.path.getsize(output_mp4) > 1024 * 100:
             logger.info(f"✅ FFmpeg download success: {format_bytes(os.path.getsize(output_mp4))}")
             return True
         else:
-            logger.error(f"❌ FFmpeg error: {res.stderr[-400:] if res.stderr else 'Failed'}")
+            logger.warning(f"⚠️ FFmpeg error: {res.stderr[-400:] if res.stderr else 'Failed'}")
     except Exception as e:
-        logger.error(f"❌ FFmpeg execution exception: {e}")
+        logger.warning(f"⚠️ FFmpeg execution exception: {e}")
+
+    logger.info("⚠️ Trying yt-dlp fallback...")
+    dl_cmd = [
+        'yt-dlp',
+        '--add-header', f'Referer: {referer}',
+        '--add-header', f'User-Agent: {HEADERS["User-Agent"]}',
+        '--downloader', 'ffmpeg',
+        '--downloader-args', 'ffmpeg:-protocol_whitelist file,http,https,tcp,tls,crypto',
+        '-o', output_mp4,
+        stream_url
+    ]
+    try:
+        res = subprocess.run(dl_cmd, capture_output=True, text=True)
+        if os.path.exists(output_mp4) and os.path.getsize(output_mp4) > 1024 * 100:
+            logger.info(f"✅ yt-dlp download success: {format_bytes(os.path.getsize(output_mp4))}")
+            return True
+        else:
+            logger.error(f"❌ yt-dlp error: {res.stderr[-300:] if res.stderr else 'No output'}")
+    except Exception as e:
+        logger.error(f"❌ yt-dlp exception: {e}")
 
     return False
 
+def get_discussion_thread_id(channel_msg_id, code=""):
+    """
+    Finds the thread message_id in the linked discussion supergroup for a channel post.
+    Returns the discussion thread message ID or None.
+    """
+    if not channel_msg_id:
+        return None
+
+    time.sleep(3)
+    try:
+        ping = telegram_helper.send_message(chat_id=DISCUSS_CHAT_ID, text="🔍 Syncing...")
+        if ping.get("ok"):
+            latest_id = ping["result"]["message_id"]
+            telegram_helper.make_tg_request("deleteMessage", data={"chat_id": DISCUSS_CHAT_ID, "message_id": latest_id})
+
+            for test_id in range(latest_id - 1, max(1, latest_id - 35), -1):
+                chk = telegram_helper.send_message(chat_id=DISCUSS_CHAT_ID, text="✓", reply_to_message_id=test_id)
+                if chk.get("ok"):
+                    rep_msg = chk["result"]
+                    rep_id = rep_msg["message_id"]
+                    telegram_helper.make_tg_request("deleteMessage", data={"chat_id": DISCUSS_CHAT_ID, "message_id": rep_id})
+
+                    reply_to = rep_msg.get("reply_to_message", {})
+                    fwd_id = reply_to.get("forward_from_message_id")
+                    if not fwd_id and "forward_origin" in reply_to:
+                        fwd_id = reply_to["forward_origin"].get("message_id")
+                    
+                    matched = False
+                    if fwd_id and str(fwd_id) == str(channel_msg_id):
+                        matched = True
+                    elif code:
+                        caption = (reply_to.get("caption") or reply_to.get("text") or "").upper()
+                        if code.upper() in caption:
+                            matched = True
+
+                    if matched:
+                        logger.info(f"🎯 Resolved Discussion Thread Msg #{test_id} in {DISCUSS_CHAT_ID} for Channel Post #{channel_msg_id}")
+                        return test_id
+                time.sleep(0.2)
+    except Exception as e:
+        logger.warning(f"⚠️ Discussion thread resolution warning: {e}")
+
+    logger.info(f"ℹ️ Discussion thread ID not found in recent messages for Channel Post #{channel_msg_id}. Will post directly to Discussion Supergroup.")
+    return None
+
 def get_video_meta(video_path):
-    """
-    Probes video metadata (duration, width, height) using ffprobe.
-    """
     cmd = [
         "ffprobe", "-v", "error",
         "-select_streams", "v:0",
@@ -377,16 +448,13 @@ def get_video_meta(video_path):
         return {
             "width": width,
             "height": height,
-            "duration": int(duration)
+            "duration": duration
         }
     except Exception as e:
-        logger.warning(f"⚠️ ffprobe probe warning: {e}")
+        logger.warning(f"ffprobe warning: {e}")
         return {"width": 1280, "height": 720, "duration": 0}
 
 def generate_video_thumb(video_path, thumb_path, timestamp=2.0):
-    """
-    Generates 1280x720 JPEG video thumbnail with aspect ratio preservation and padding.
-    """
     cmd = [
         "ffmpeg", "-y",
         "-ss", str(timestamp),
@@ -401,7 +469,7 @@ def generate_video_thumb(video_path, thumb_path, timestamp=2.0):
 
 def split_video_lossless(input_mp4, output_dir, max_bytes=MAX_CHUNK_BYTES):
     """
-    Splits video into streamable parts strictly <= 45MB using FFmpeg lossless stream copy.
+    Splits video into streamable parts <= 45MB using FFmpeg lossless stream copy.
     """
     os.makedirs(output_dir, exist_ok=True)
     file_size = os.path.getsize(input_mp4)
@@ -413,13 +481,10 @@ def split_video_lossless(input_mp4, output_dir, max_bytes=MAX_CHUNK_BYTES):
     if duration <= 0:
         return [input_mp4]
 
-    # Target chunk with 10% safety headroom (~40.5MB) to avoid VBR spikes crossing 45MB
-    target_chunk_bytes = int(max_bytes * 0.90)
-    num_parts = max(1, math.ceil(file_size / target_chunk_bytes))
-    segment_duration = max(10, int(duration / num_parts))
-    # Cap segment duration to 260 seconds max
-    if segment_duration > 260:
-        segment_duration = 260
+    num_parts = math.ceil(file_size / max_bytes)
+    segment_duration = int(duration / num_parts)
+    if segment_duration < 1:
+        segment_duration = 1
 
     out_pattern = os.path.join(output_dir, "part_%03d.mp4")
     cmd = [
@@ -430,10 +495,9 @@ def split_video_lossless(input_mp4, output_dir, max_bytes=MAX_CHUNK_BYTES):
         "-segment_time", str(segment_duration),
         "-f", "segment",
         "-reset_timestamps", "1",
-        "-avoid_negative_ts", "make_zero",
         out_pattern
     ]
-    logger.info(f"✂️ Slicing video into ~{segment_duration}s streaming segments (target <= {format_bytes(max_bytes)})...")
+    logger.info(f"✂️ Slicing video into ~{segment_duration}s streaming segments ({num_parts} parts)...")
     subprocess.run(cmd, capture_output=True)
 
     parts = sorted([
@@ -441,31 +505,17 @@ def split_video_lossless(input_mp4, output_dir, max_bytes=MAX_CHUNK_BYTES):
         for f in os.listdir(output_dir)
         if f.startswith("part_") and f.endswith(".mp4") and os.path.getsize(os.path.join(output_dir, f)) > 1024
     ])
-
-    if not parts:
-        return [input_mp4]
-
-    # Verify all parts <= max_bytes; if any exceeds, split it further
-    verified_parts = []
-    for part in parts:
-        p_size = os.path.getsize(part)
-        if p_size > max_bytes:
-            logger.warning(f"⚠️ Part {part} is {format_bytes(p_size)} > {format_bytes(max_bytes)}, sub-slicing...")
-            sub_dir = os.path.join(output_dir, f"sub_{os.path.splitext(os.path.basename(part))[0]}")
-            sub_parts = split_video_lossless(part, sub_dir, max_bytes=max_bytes)
-            verified_parts.extend(sub_parts)
-        else:
-            verified_parts.append(part)
-
-    return verified_parts
+    if parts:
+        return parts
+    return [input_mp4]
 
 def process_single_stream(stream_url, work_dir, title, code, ep_num, total_eps, chat_id, post_id, folder_id, owner_email):
     """
     Processes one episode / stream:
-    1. Downloads stream to MP4 via 16-worker yt-dlp / FFmpeg stream copy.
-    2. Uploads master to Google Drive (5TB OAuth2 quota).
-    3. Splits video into strictly <= 45MB parts.
-    4. Posts parts with 1280x720 thumbnails, width, height, duration to Telegram comments.
+    1. Downloads stream to MP4.
+    2. Uploads master to Google Drive (5TB OAuth2).
+    3. Splits video into <=45MB parts.
+    4. Posts parts with thumbnails, width, height, duration to Telegram comments.
     """
     safe_code = clean_filename(code) if code else "Stream"
     safe_title = clean_filename(title)[:60]
@@ -501,8 +551,8 @@ def process_single_stream(stream_url, work_dir, title, code, ep_num, total_eps, 
         logger.warning(f"⚠️ GDrive Upload error: {e}")
 
     # 3. Post parts to Telegram comments
-    if chat_id and post_id:
-        logger.info(f"✂️ Splitting video for Telegram comments (Chat {chat_id}, Post {post_id})...")
+    if chat_id:
+        logger.info(f"✂️ Splitting video for Telegram comments (Chat {chat_id}, Reply Thread {post_id})...")
         split_dir = os.path.join(work_dir, f"split_ep_{ep_num}")
         parts = split_video_lossless(master_mp4, split_dir, max_bytes=MAX_CHUNK_BYTES)
         total_parts = len(parts)
@@ -520,9 +570,9 @@ def process_single_stream(stream_url, work_dir, title, code, ep_num, total_eps, 
             ep_header = f"<b>{safe_code} - Tập {ep_num}/{total_eps}</b>" if total_eps > 1 else f"<b>{safe_code or safe_title}</b>"
             caption = f"📹 {ep_header}\n🧩 <b>Phần {p_idx}/{total_parts}</b> (<code>{format_bytes(p_size)}</code>)"
             if p_idx == 1 and drive_link:
-                caption += f"\n💾 <a href='{drive_link}'>Full Master Lossless GDrive</a>"
+                caption += f"\n💾 <a href='{drive_link}'>Google Drive Master (Lossless)</a>"
 
-            logger.info(f"  📤 Sending Part {p_idx}/{total_parts} ({format_bytes(p_size)}) with thumbnail {part_w}x{part_h} ({part_dur}s)...")
+            logger.info(f"  📤 Sending Part {p_idx}/{total_parts} ({format_bytes(p_size)}) with thumbnail {part_w}x{part_h} ({part_dur:.0f}s)...")
             res = telegram_helper.send_video(
                 chat_id=chat_id,
                 video_path=part_path,
@@ -531,25 +581,19 @@ def process_single_stream(stream_url, work_dir, title, code, ep_num, total_eps, 
                 duration=part_dur,
                 width=part_w,
                 height=part_h,
-                reply_to_message_id=int(post_id),
-                supports_streaming=True
+                reply_to_message_id=int(post_id) if post_id else None
             )
+
             if res.get("ok"):
-                logger.info(f"    ✅ Telegram Part {p_idx}/{total_parts} sent (Msg ID {res.get('result', {}).get('message_id')})")
+                sent_msg_id = res.get("result", {}).get("message_id")
+                logger.info(f"    ✅ Telegram Part {p_idx}/{total_parts} sent (Msg ID {sent_msg_id})")
             else:
-                logger.warning(f"    ⚠️ Telegram Part {p_idx}/{total_parts} upload response: {res}")
+                logger.warning(f"    ⚠️ Telegram Part {p_idx}/{total_parts} send warning: {res.get('error')}")
 
-            if has_thumb and os.path.exists(thumb_file):
-                try:
-                    os.remove(thumb_file)
-                except Exception:
-                    pass
-
-            time.sleep(2)  # Maintain order and avoid rate limit
+            time.sleep(2)
 
         shutil.rmtree(split_dir, ignore_errors=True)
 
-    # Cleanup master MP4 to free runner disk space
     try:
         os.remove(master_mp4)
     except Exception:
@@ -575,9 +619,15 @@ def main():
     post_id = data.get("post_id", "")
     folder_id = data.get("folder_id", DRIVE_ROOT)
     owner_email = data.get("owner_email", DEFAULT_OWNER_EMAIL)
+    row_index = data.get("row_index")
+
+    if row_index:
+        update_gsheet_row(row_index, status="In Progress (Cloud Runner)")
+
+    channel_id = os.environ.get("TARGET_CHANNEL_ID", "-1002244827586")
+    discuss_id = os.environ.get("DISCUSS_CHAT_ID", "-1002087114535")
 
     episodes_raw = data.get("episodes", [])
-
     if not target_url and not m3u8_url and not episodes_raw:
         logger.error("⚠️ No stream URL, page URL or episodes provided. Exiting gracefully.")
         return
@@ -586,31 +636,9 @@ def main():
     os.makedirs(work_dir, exist_ok=True)
 
     episodes_to_process = []
+    details = {}
 
-    # 1. Explicit episodes array in payload
-    if episodes_raw:
-        logger.info(f"📋 Processing {len(episodes_raw)} explicit episodes from payload...")
-        for ep in episodes_raw:
-            ep_url = ep.get("stream_url") or ep.get("url") or ""
-            resolved_m3u8 = get_stream_m3u8_url(ep_url) if ("/e/" in ep_url and ".m3u8" not in ep_url) else ep_url
-            if resolved_m3u8:
-                episodes_to_process.append({
-                    "name": ep.get("name", str(ep.get("number", 1))),
-                    "number": ep.get("number", 1),
-                    "stream_url": resolved_m3u8
-                })
-
-    # 2. Prioritize direct m3u8_url if provided
-    elif m3u8_url:
-        logger.info(f"🔗 Using provided direct stream URL: {m3u8_url[:80]}...")
-        episodes_to_process.append({
-            "name": "1",
-            "number": 1,
-            "stream_url": m3u8_url
-        })
-
-    # 3. Check if target_url is 123av / missav page
-    elif is_123av_url(target_url) and "/e/" not in target_url and not target_url.endswith(".m3u8"):
+    if is_123av_url(target_url) and "/e/" not in target_url and not target_url.endswith(".m3u8"):
         logger.info(f"🔍 Scraping 123AV details for: {target_url}")
         details = scrape_123av_details(target_url)
         if not details.get("error"):
@@ -619,7 +647,7 @@ def main():
             eps = details.get("episodes", [])
             for ep in eps:
                 ep_url = ep.get("url", "")
-                resolved_m3u8 = get_stream_m3u8_url(ep_url)
+                resolved_m3u8 = get_stream_m3u8_url(ep_url) if ("/e/" in ep_url and ".m3u8" not in ep_url) else ep_url
                 if resolved_m3u8:
                     episodes_to_process.append({
                         "name": ep.get("name", "1"),
@@ -629,23 +657,69 @@ def main():
         else:
             logger.warning(f"⚠️ Scraping failed: {details.get('error')}")
 
-    # 4. If javplayer embed URL
-    if not episodes_to_process and target_url and "/e/" in target_url:
-        resolved_m3u8 = get_stream_m3u8_url(target_url)
-        if resolved_m3u8:
-            episodes_to_process.append({
-                "name": "1",
-                "number": 1,
-                "stream_url": resolved_m3u8
-            })
+    if not episodes_to_process:
+        if episodes_raw:
+            for ep in episodes_raw:
+                ep_url = ep.get("stream_url") or ep.get("url") or ""
+                resolved = get_stream_m3u8_url(ep_url) if ("/e/" in ep_url and ".m3u8" not in ep_url) else ep_url
+                if resolved:
+                    episodes_to_process.append({
+                        "name": ep.get("name", str(ep.get("number", 1))),
+                        "number": ep.get("number", 1),
+                        "stream_url": resolved
+                    })
+        elif m3u8_url:
+            episodes_to_process.append({"name": "1", "number": 1, "stream_url": m3u8_url})
+        elif target_url:
+            resolved = get_stream_m3u8_url(target_url) if ("/e/" in target_url and ".m3u8" not in target_url) else target_url
+            if resolved:
+                episodes_to_process.append({"name": "1", "number": 1, "stream_url": resolved})
 
-    # 5. Fallback: if direct m3u8 or mp4 in target_url
-    if not episodes_to_process and target_url:
-        episodes_to_process.append({
-            "name": "1",
-            "number": 1,
-            "stream_url": target_url
-        })
+    if not episodes_to_process:
+        logger.error("❌ No playable stream URLs could be extracted. Exiting.")
+        if row_index:
+            update_gsheet_row(row_index, status="Error (No Stream URL)")
+        return
+
+    channel_post_id = None
+    disc_thread_id = None
+
+    if post_id:
+        channel_post_id = str(post_id)
+        logger.info(f"📢 Using existing Channel Post #{channel_post_id}")
+        disc_thread_id = get_discussion_thread_id(channel_post_id, code=code)
+    else:
+        caption_lines = [f"🎬 <b>{title}</b>"]
+        if code:
+            caption_lines.append(f"🏷️ <b>Mã phim:</b> <code>{code}</code>")
+        meta = details.get("metadata", {})
+        if meta.get("Cast"):
+            caption_lines.append(f"💃 <b>Diễn viên:</b> {meta.get('Cast')}")
+        if meta.get("Maker"):
+            caption_lines.append(f"🏢 <b>Hãng:</b> {meta.get('Maker')}")
+        if meta.get("Release date"):
+            caption_lines.append(f"📅 <b>Phát hành:</b> {meta.get('Release date')}")
+        if meta.get("Genres"):
+            caption_lines.append(f"🎭 <b>Thể loại:</b> {meta.get('Genres')}")
+        caption_lines.append("")
+        post_caption = "\n".join(caption_lines)
+        cover_url = details.get("cover_url")
+
+        if cover_url:
+            p_res = telegram_helper.send_photo(chat_id=channel_id, photo_path_or_url=cover_url, caption=post_caption)
+        else:
+            p_res = telegram_helper.send_message(chat_id=channel_id, text=post_caption)
+
+        if p_res.get("ok"):
+            channel_post_id = str(p_res.get("result", {}).get("message_id"))
+            logger.info(f"📢 Created Channel Post #{channel_post_id} on {channel_id}")
+            disc_thread_id = get_discussion_thread_id(channel_post_id, code=code)
+            if row_index:
+                update_gsheet_row(row_index, title=title, post_id=channel_post_id, status="In Progress (Downloading)")
+
+    target_chat_id = discuss_id
+    target_reply_id = str(disc_thread_id) if disc_thread_id else None
+    logger.info(f"🔒 Destination: Chat {target_chat_id}, Thread/Reply Msg #{target_reply_id or 'Direct'}")
 
     logger.info(f"📦 Total episodes to process: {len(episodes_to_process)}")
     total_eps = len(episodes_to_process)
@@ -660,16 +734,15 @@ def main():
             code=code,
             ep_num=ep_idx,
             total_eps=total_eps,
-            chat_id=chat_id,
-            post_id=post_id,
+            chat_id=target_chat_id,
+            post_id=target_reply_id,
             folder_id=folder_id,
             owner_email=owner_email
         )
         if res:
             results.append(res)
 
-    # Post final summary message in comments
-    if chat_id and post_id and results:
+    if target_chat_id and results:
         summary_msg = (
             f"✅ <b>HOÀN TẤT XỬ LÝ MEDIA STREAM: <code>{code or title[:40]}</code></b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -679,15 +752,18 @@ def main():
             if r['drive_link']:
                 summary_msg += f"  💾 <a href='{r['drive_link']}'>Tải bản gốc Lossless Google Drive</a>\n"
         summary_msg += "\n🎉 <i>Quý vị có thể xem video trực tiếp ở trên hoặc tải file gốc từ Google Drive.</i>"
-        
+
         telegram_helper.send_message(
-            chat_id=chat_id,
+            chat_id=target_chat_id,
             text=summary_msg,
             parse_mode="HTML",
-            reply_to_message_id=int(post_id)
+            reply_to_message_id=int(target_reply_id) if target_reply_id else None
         )
 
-    # Cleanup work directory
+    master_link = results[0]["drive_link"] if results else ""
+    if row_index:
+        update_gsheet_row(row_index, title=title, post_id=channel_post_id or post_id, drive_link=master_link, status="Completed")
+
     shutil.rmtree(work_dir, ignore_errors=True)
     logger.info("🎉 Media stream processing pipeline completed successfully.")
 
