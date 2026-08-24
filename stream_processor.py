@@ -233,9 +233,9 @@ def scrape_123av_details(video_url):
         logger.error(f"Error scraping 123av details: {e}")
         return {"error": str(e)}
 
-def update_gsheet_row(row_index, title=None, post_id=None, drive_link=None, status="Completed"):
+def update_gsheet_row(row_index, title=None, post_id=None, drive_link=None, status="Completed", ep_count=1, movie_code="", gdrive_files_count=None):
     """
-    Updates Google Sheet Adult_18Plus tab directly from GitHub Actions runner.
+    Updates Google Sheet Adult_18Plus tab directly from GitHub Actions runner (13 columns format).
     """
     if not row_index:
         return False
@@ -244,6 +244,7 @@ def update_gsheet_row(row_index, title=None, post_id=None, drive_link=None, stat
     oauth_b64 = os.environ.get("GDRIVE_OAUTH_BASE64", "")
     try:
         import gspread
+        import datetime
         from google.oauth2 import service_account
         from google.oauth2.credentials import Credentials
 
@@ -252,16 +253,23 @@ def update_gsheet_row(row_index, title=None, post_id=None, drive_link=None, stat
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive"
         ]
-        if sa_b64:
+        if oauth_b64:
+            try:
+                oauth_info = json.loads(base64.b64decode(oauth_b64).decode("utf-8"))
+                creds = Credentials(
+                    None,
+                    refresh_token=oauth_info["refresh_token"],
+                    token_uri="https://oauth2.googleapis.com/token",
+                    client_id=oauth_info["client_id"],
+                    client_secret=oauth_info["client_secret"],
+                    scopes=scopes
+                )
+            except Exception:
+                pass
+        if not creds and sa_b64:
             try:
                 sa_info = json.loads(base64.b64decode(sa_b64).decode("utf-8"))
                 creds = service_account.Credentials.from_service_account_info(sa_info, scopes=scopes)
-            except Exception:
-                pass
-        if not creds and oauth_b64:
-            try:
-                user_info = json.loads(base64.b64decode(oauth_b64).decode("utf-8"))
-                creds = Credentials.from_authorized_user_info(user_info, scopes=scopes)
             except Exception:
                 pass
 
@@ -273,16 +281,30 @@ def update_gsheet_row(row_index, title=None, post_id=None, drive_link=None, stat
         sh = gc.open_by_key(sheet_id)
         ws = sh.worksheet("Adult_18Plus")
 
+        now_str = datetime.datetime.now().strftime("%d/%m %H:%M:%S")
+        updates = []
         if title:
-            ws.update_cell(row_index, 4, str(title))
+            updates.append({"range": f"D{row_index}", "values": [[str(title)]]})
+        if movie_code:
+            updates.append({"range": f"F{row_index}", "values": [[str(movie_code)]]})
+        if ep_count:
+            updates.append({"range": f"G{row_index}", "values": [[str(ep_count)]]})
         if status:
-            ws.update_cell(row_index, 6, str(status))
+            updates.append({"range": f"H{row_index}", "values": [[str(status)]]})
         if post_id:
-            ws.update_cell(row_index, 7, str(post_id))
+            updates.append({"range": f"I{row_index}", "values": [[str(post_id)]]})
+        
+        files_cnt = gdrive_files_count if gdrive_files_count is not None else (1 if drive_link else 0)
+        updates.append({"range": f"J{row_index}", "values": [[str(files_cnt)]]})
         if drive_link:
-            ws.update_cell(row_index, 8, str(drive_link))
+            updates.append({"range": f"K{row_index}", "values": [[str(drive_link)]]})
+        
+        audit_res = f"✅ Khớp {files_cnt}/{ep_count} Tập" if files_cnt == ep_count and ep_count > 0 else f"⏳ {status}"
+        updates.append({"range": f"L{row_index}", "values": [[str(audit_res)]]})
+        updates.append({"range": f"M{row_index}", "values": [[now_str]]})
 
-        logger.info(f"✅ Updated Google Sheet row #{row_index}: status={status}, post_id={post_id}")
+        ws.batch_update(updates)
+        logger.info(f"📊 Updated GSheet row #{row_index} (13 columns): status='{status}', post_id='{post_id}', audit='{audit_res}'")
         return True
     except Exception as e:
         logger.warning(f"⚠️ GSheet update warning: {e}")
@@ -385,47 +407,67 @@ def download_and_merge_m3u8(stream_url, output_mp4, referer="https://javplayer.c
 
 def get_discussion_thread_id(channel_msg_id, code=""):
     """
-    Finds the thread message_id in the linked discussion supergroup for a channel post.
-    Returns the discussion thread message ID or None.
+    2-Tier Discussion Topic Resolution:
+    Tier 1: Check getChat pinned_message
+    Tier 2: Probe backwards starting from recent messages with retries for propagation delay.
     """
     if not channel_msg_id:
         return None
 
-    time.sleep(3)
+    # Step 1: Check getChat pinned_message
     try:
-        ping = telegram_helper.send_message(chat_id=DISCUSS_CHAT_ID, text="🔍 Syncing...")
-        if ping.get("ok"):
-            latest_id = ping["result"]["message_id"]
-            telegram_helper.make_tg_request("deleteMessage", data={"chat_id": DISCUSS_CHAT_ID, "message_id": latest_id})
-
-            for test_id in range(latest_id - 1, max(1, latest_id - 35), -1):
-                chk = telegram_helper.send_message(chat_id=DISCUSS_CHAT_ID, text="✓", reply_to_message_id=test_id)
-                if chk.get("ok"):
-                    rep_msg = chk["result"]
-                    rep_id = rep_msg["message_id"]
-                    telegram_helper.make_tg_request("deleteMessage", data={"chat_id": DISCUSS_CHAT_ID, "message_id": rep_id})
-
-                    reply_to = rep_msg.get("reply_to_message", {})
-                    fwd_id = reply_to.get("forward_from_message_id")
-                    if not fwd_id and "forward_origin" in reply_to:
-                        fwd_id = reply_to["forward_origin"].get("message_id")
-                    
-                    matched = False
-                    if fwd_id and str(fwd_id) == str(channel_msg_id):
-                        matched = True
-                    elif code:
-                        caption = (reply_to.get("caption") or reply_to.get("text") or "").upper()
-                        if code.upper() in caption:
-                            matched = True
-
-                    if matched:
-                        logger.info(f"🎯 Resolved Discussion Thread Msg #{test_id} in {DISCUSS_CHAT_ID} for Channel Post #{channel_msg_id}")
-                        return test_id
-                time.sleep(0.2)
+        r_chat = telegram_helper.make_tg_request("getChat", data={"chat_id": DISCUSS_CHAT_ID})
+        if r_chat.get("ok"):
+            pinned = r_chat.get("result", {}).get("pinned_message")
+            if pinned:
+                rep_id = pinned.get("message_id")
+                fwd_id = pinned.get("forward_from_message_id")
+                if not fwd_id and "forward_origin" in pinned:
+                    fwd_id = pinned["forward_origin"].get("message_id")
+                if fwd_id and str(fwd_id) == str(channel_msg_id):
+                    logger.info(f"🎯 [Tier 1] Resolved Discussion Thread Msg #{rep_id} from pinned_message for Channel Post #{channel_msg_id}")
+                    return rep_id
     except Exception as e:
-        logger.warning(f"⚠️ Discussion thread resolution warning: {e}")
+        logger.warning(f"Pinned message check warning: {e}")
 
-    logger.info(f"ℹ️ Discussion thread ID not found in recent messages for Channel Post #{channel_msg_id}. Will post directly to Discussion Supergroup.")
+    # Step 2: Probe backwards with retries for propagation delay
+    for attempt in range(1, 6):
+        time.sleep(2.5 + attempt * 0.5)
+        try:
+            ping = telegram_helper.send_message(chat_id=DISCUSS_CHAT_ID, text="🔍 Syncing...")
+            if ping.get("ok"):
+                latest_id = ping["result"]["message_id"]
+                telegram_helper.make_tg_request("deleteMessage", data={"chat_id": DISCUSS_CHAT_ID, "message_id": latest_id})
+
+                # Check backwards up to 12 messages
+                for test_id in range(latest_id - 1, max(1, latest_id - 14), -1):
+                    chk = telegram_helper.send_message(chat_id=DISCUSS_CHAT_ID, text="✓", reply_to_message_id=test_id)
+                    if chk.get("ok"):
+                        rep_msg = chk["result"]
+                        rep_id = rep_msg["message_id"]
+                        telegram_helper.make_tg_request("deleteMessage", data={"chat_id": DISCUSS_CHAT_ID, "message_id": rep_id})
+
+                        reply_to = rep_msg.get("reply_to_message", {})
+                        fwd_id = reply_to.get("forward_from_message_id")
+                        if not fwd_id and "forward_origin" in reply_to:
+                            fwd_id = reply_to["forward_origin"].get("message_id")
+                        
+                        matched = False
+                        if fwd_id and str(fwd_id) == str(channel_msg_id):
+                            matched = True
+                        elif code:
+                            caption = (reply_to.get("caption") or reply_to.get("text") or "").upper()
+                            if code.upper() in caption:
+                                matched = True
+
+                        if matched:
+                            logger.info(f"🎯 [Tier 2] Resolved Discussion Thread Msg #{test_id} in {DISCUSS_CHAT_ID} for Channel Post #{channel_msg_id}")
+                            return test_id
+                    time.sleep(0.15)
+        except Exception as e:
+            logger.warning(f"Discussion thread resolution attempt {attempt} error: {e}")
+
+    logger.error(f"❌ Could not resolve Discussion Thread ID for Channel Post #{channel_msg_id}")
     return None
 
 def get_video_meta(video_path):
@@ -513,7 +555,7 @@ def process_single_stream(stream_url, work_dir, title, code, ep_num, total_eps, 
     """
     Processes one episode / stream:
     1. Downloads stream to MP4.
-    2. Uploads master to Google Drive (5TB OAuth2).
+    2. Uploads master to Google Drive (5TB OAuth2 with deduplication).
     3. Splits video into <=45MB parts.
     4. Posts parts with thumbnails, width, height, duration to Telegram comments.
     """
@@ -528,7 +570,8 @@ def process_single_stream(stream_url, work_dir, title, code, ep_num, total_eps, 
 
     # 1. Download
     logger.info(f"🎬 [Stream {ep_num}/{total_eps}] Downloading: {master_name}")
-    if not download_and_merge_m3u8(stream_url, master_mp4):
+    referer = "https://123av.org/" if "surrit.com" in stream_url else "https://javplayer.cc/"
+    if not download_and_merge_m3u8(stream_url, master_mp4, referer=referer):
         logger.error(f"❌ Failed downloading stream for: {master_name}")
         return None
 
@@ -551,8 +594,8 @@ def process_single_stream(stream_url, work_dir, title, code, ep_num, total_eps, 
         logger.warning(f"⚠️ GDrive Upload error: {e}")
 
     # 3. Post parts to Telegram comments
-    if chat_id:
-        logger.info(f"✂️ Splitting video for Telegram comments (Chat {chat_id}, Reply Thread {post_id})...")
+    if chat_id and post_id:
+        logger.info(f"✂️ Splitting video for Telegram comments (Chat {chat_id}, Reply Thread #{post_id})...")
         split_dir = os.path.join(work_dir, f"split_ep_{ep_num}")
         parts = split_video_lossless(master_mp4, split_dir, max_bytes=MAX_CHUNK_BYTES)
         total_parts = len(parts)
@@ -573,26 +616,46 @@ def process_single_stream(stream_url, work_dir, title, code, ep_num, total_eps, 
                 caption += f"\n💾 <a href='{drive_link}'>Google Drive Master (Lossless)</a>"
 
             logger.info(f"  📤 Sending Part {p_idx}/{total_parts} ({format_bytes(p_size)}) with thumbnail {part_w}x{part_h} ({part_dur:.0f}s)...")
-            res = telegram_helper.send_video(
-                chat_id=chat_id,
-                video_path=part_path,
-                caption=caption,
-                thumb_path=thumb_file if has_thumb else None,
-                duration=part_dur,
-                width=part_w,
-                height=part_h,
-                reply_to_message_id=int(post_id) if post_id else None
-            )
+            
+            # Robust retry loop per part
+            sent_ok = False
+            for send_attempt in range(1, 7):
+                res = telegram_helper.send_video(
+                    chat_id=chat_id,
+                    video_path=part_path,
+                    caption=caption,
+                    thumb_path=thumb_file if has_thumb else None,
+                    duration=part_dur,
+                    width=part_w,
+                    height=part_h,
+                    reply_to_message_id=int(post_id)
+                )
+                if res.get("ok"):
+                    sent_msg_id = res.get("result", {}).get("message_id")
+                    logger.info(f"    ✅ Telegram Part {p_idx}/{total_parts} sent (Msg ID {sent_msg_id})")
+                    sent_ok = True
+                    break
+                else:
+                    logger.warning(f"    ⚠️ Telegram Part {p_idx}/{total_parts} send attempt {send_attempt} failed: {res.get('error')}")
+                    time.sleep(3 * send_attempt)
 
-            if res.get("ok"):
-                sent_msg_id = res.get("result", {}).get("message_id")
-                logger.info(f"    ✅ Telegram Part {p_idx}/{total_parts} sent (Msg ID {sent_msg_id})")
-            else:
-                logger.warning(f"    ⚠️ Telegram Part {p_idx}/{total_parts} send warning: {res.get('error')}")
+            if not sent_ok:
+                logger.error(f"❌ Failed to send Part {p_idx}/{total_parts} after all retries!")
 
-            time.sleep(2)
+            # Immediate cleanup of part to conserve disk space
+            try:
+                if os.path.exists(part_path):
+                    os.remove(part_path)
+                if os.path.exists(thumb_file):
+                    os.remove(thumb_file)
+            except Exception:
+                pass
+
+            time.sleep(2.5)  # Pacing between parts
 
         shutil.rmtree(split_dir, ignore_errors=True)
+    elif chat_id and not post_id:
+        logger.error("❌ [GATEKEEPER BARRIER] Discussion thread ID not available. Skipped part upload to protect general chat.")
 
     try:
         os.remove(master_mp4)
@@ -622,7 +685,7 @@ def main():
     row_index = data.get("row_index")
 
     if row_index:
-        update_gsheet_row(row_index, status="In Progress (Cloud Runner)")
+        update_gsheet_row(row_index, title=title, movie_code=code, status="In Progress (Cloud Runner)")
 
     channel_id = os.environ.get("TARGET_CHANNEL_ID", "-1002244827586")
     discuss_id = os.environ.get("DISCUSS_CHAT_ID", "-1002087114535")
@@ -678,7 +741,7 @@ def main():
     if not episodes_to_process:
         logger.error("❌ No playable stream URLs could be extracted. Exiting.")
         if row_index:
-            update_gsheet_row(row_index, status="Error (No Stream URL)")
+            update_gsheet_row(row_index, title=title, movie_code=code, status="Error (No Stream URL)")
         return
 
     channel_post_id = None
@@ -692,7 +755,7 @@ def main():
         caption_lines = [f"🎬 <b>{title}</b>"]
         if code:
             caption_lines.append(f"🏷️ <b>Mã phim:</b> <code>{code}</code>")
-        meta = details.get("metadata", {})
+        meta = data.get("metadata") or details.get("metadata", {})
         if meta.get("Cast"):
             caption_lines.append(f"💃 <b>Diễn viên:</b> {meta.get('Cast')}")
         if meta.get("Maker"):
@@ -703,7 +766,7 @@ def main():
             caption_lines.append(f"🎭 <b>Thể loại:</b> {meta.get('Genres')}")
         caption_lines.append("")
         post_caption = "\n".join(caption_lines)
-        cover_url = details.get("cover_url")
+        cover_url = data.get("cover_url") or details.get("cover_url")
 
         if cover_url:
             p_res = telegram_helper.send_photo(chat_id=channel_id, photo_path_or_url=cover_url, caption=post_caption)
@@ -715,11 +778,17 @@ def main():
             logger.info(f"📢 Created Channel Post #{channel_post_id} on {channel_id}")
             disc_thread_id = get_discussion_thread_id(channel_post_id, code=code)
             if row_index:
-                update_gsheet_row(row_index, title=title, post_id=channel_post_id, status="In Progress (Downloading)")
+                update_gsheet_row(row_index, title=title, movie_code=code, post_id=channel_post_id, status="In Progress (Downloading)")
+        else:
+            logger.error(f"❌ Failed creating channel post: {p_res}")
+
+    if not disc_thread_id and channel_post_id:
+        logger.warning("⚠️ Discussion thread ID not immediately resolved, retrying one final time...")
+        disc_thread_id = get_discussion_thread_id(channel_post_id, code=code)
 
     target_chat_id = discuss_id
     target_reply_id = str(disc_thread_id) if disc_thread_id else None
-    logger.info(f"🔒 Destination: Chat {target_chat_id}, Thread/Reply Msg #{target_reply_id or 'Direct'}")
+    logger.info(f"🔒 Destination: Chat {target_chat_id}, Thread/Reply Msg #{target_reply_id or 'NOT FOUND'}")
 
     logger.info(f"📦 Total episodes to process: {len(episodes_to_process)}")
     total_eps = len(episodes_to_process)
@@ -742,7 +811,7 @@ def main():
         if res:
             results.append(res)
 
-    if target_chat_id and results:
+    if target_chat_id and target_reply_id and results:
         summary_msg = (
             f"✅ <b>HOÀN TẤT XỬ LÝ MEDIA STREAM: <code>{code or title[:40]}</code></b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -757,12 +826,21 @@ def main():
             chat_id=target_chat_id,
             text=summary_msg,
             parse_mode="HTML",
-            reply_to_message_id=int(target_reply_id) if target_reply_id else None
+            reply_to_message_id=int(target_reply_id)
         )
 
     master_link = results[0]["drive_link"] if results else ""
     if row_index:
-        update_gsheet_row(row_index, title=title, post_id=channel_post_id or post_id, drive_link=master_link, status="Completed")
+        update_gsheet_row(
+            row_index=row_index,
+            title=title,
+            movie_code=code,
+            post_id=channel_post_id or post_id,
+            drive_link=master_link,
+            status="Completed",
+            ep_count=total_eps,
+            gdrive_files_count=len(results)
+        )
 
     shutil.rmtree(work_dir, ignore_errors=True)
     logger.info("🎉 Media stream processing pipeline completed successfully.")
