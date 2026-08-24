@@ -36,11 +36,8 @@ def make_tg_request(method, data=None, files=None, max_retries=5, timeout=300):
                     
                     err_desc = res_json.get("description", "").lower()
                     if res_json.get("error_code") == 400 and ("message to be replied not found" in err_desc or "reply_to_message" in err_desc):
-                        target_chat = data.get("chat_id") if data else "target"
-                        logger.warning(f"⚠️ [GATEKEEPER 3 Self-Healing] reply_to_message_id not found in {target_chat}! Reposting directly to discussion group...")
-                        if data and "reply_to_message_id" in data:
-                            del data["reply_to_message_id"]
-                            return make_tg_request(method, data=data, files=files, max_retries=max_retries - attempt + 1, timeout=timeout)
+                        logger.error(f"❌ [GATEKEEPER 3] reply_to_message_id not found in {data.get('chat_id')}! Strictly refusing to dump unthreaded video into group root!")
+                        return {"ok": False, "error": "message_to_be_replied_not_found"}
 
                     if res_json.get("error_code") == 429:
                         retry_after = res_json.get("parameters", {}).get("retry_after", 5)
@@ -67,11 +64,8 @@ def make_tg_request(method, data=None, files=None, max_retries=5, timeout=300):
                     
                     err_desc = res_json.get("description", "").lower()
                     if res_json.get("error_code") == 400 and ("message to be replied not found" in err_desc or "reply_to_message" in err_desc):
-                        target_chat = data.get("chat_id") if data else "target"
-                        logger.warning(f"⚠️ [GATEKEEPER 3 Self-Healing] reply_to_message_id not found in {target_chat}! Reposting directly to discussion group...")
-                        if data and "reply_to_message_id" in data:
-                            del data["reply_to_message_id"]
-                            return make_tg_request(method, data=data, files=files, max_retries=max_retries - attempt + 1, timeout=timeout)
+                        logger.error(f"❌ [GATEKEEPER 3] reply_to_message_id not found in {data.get('chat_id')}! Strictly refusing to dump unthreaded video into group root!")
+                        return {"ok": False, "error": "message_to_be_replied_not_found"}
 
                     if res_json.get("error_code") == 429:
                         retry_after = res_json.get("parameters", {}).get("retry_after", 5)
@@ -124,7 +118,6 @@ def send_video(chat_id, video_path, caption="", thumb_path=None, duration=0, wid
     if not os.path.exists(video_path):
         return {"ok": False, "error": f"Video file not found: {video_path}"}
 
-    # GATEKEEPER 2: FORBIDDEN CHANNEL VIDEO BARRIER
     if str(chat_id).strip() == str(FORBIDDEN_CHANNEL_ID):
         logger.warning(f"🚨 [GATEKEEPER 2 BARRIER] Intercepted send_video to Channel! Forcing chat_id to {DISCUSS_CHAT_ID}")
         chat_id = DISCUSS_CHAT_ID
@@ -153,47 +146,9 @@ def send_video(chat_id, video_path, caption="", thumb_path=None, duration=0, wid
         if thumb_path and os.path.exists(thumb_path):
             tf = open(thumb_path, "rb")
             opened_files.append(tf)
-            files["thumbnail"] = ("thumb.jpg", tf, "image/jpeg")
-            files["thumb"] = ("thumb.jpg", tf, "image/jpeg")
+            files["thumbnail"] = (os.path.basename(thumb_path), tf, "image/jpeg")
 
         return make_tg_request("sendVideo", data=data, files=files)
-    finally:
-        for f in opened_files:
-            try:
-                f.close()
-            except Exception:
-                pass
-
-def send_document(chat_id, doc_path, caption="", thumb_path=None, reply_to_message_id=None):
-    if not os.path.exists(doc_path):
-        return {"ok": False, "error": f"Document file not found: {doc_path}"}
-
-    # GATEKEEPER 2: Video documents blocked from channel
-    if str(chat_id).strip() == str(FORBIDDEN_CHANNEL_ID):
-        ext = os.path.splitext(doc_path)[1].lower()
-        if ext in [".mp4", ".mkv", ".avi", ".ts", ".mov", ".flv"]:
-            logger.warning(f"🚨 [GATEKEEPER 2 BARRIER] Intercepted video document {doc_path} to Channel! Redirecting to {DISCUSS_CHAT_ID}")
-            chat_id = DISCUSS_CHAT_ID
-
-    data = {
-        "chat_id": chat_id,
-        "caption": caption,
-        "parse_mode": "HTML"
-    }
-    if reply_to_message_id:
-        data["reply_to_message_id"] = reply_to_message_id
-
-    opened_files = []
-    try:
-        df = open(doc_path, "rb")
-        opened_files.append(df)
-        files = {"document": (os.path.basename(doc_path), df, "application/octet-stream")}
-        if thumb_path and os.path.exists(thumb_path):
-            tf = open(thumb_path, "rb")
-            opened_files.append(tf)
-            files["thumbnail"] = ("thumb.jpg", tf, "image/jpeg")
-
-        return make_tg_request("sendDocument", data=data, files=files)
     finally:
         for f in opened_files:
             try:
