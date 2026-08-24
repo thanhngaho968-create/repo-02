@@ -110,7 +110,21 @@ def send_photo(chat_id, photo_path_or_url, caption="", reply_to_message_id=None)
 
     if isinstance(photo_path_or_url, str) and (photo_path_or_url.startswith("http://") or photo_path_or_url.startswith("https://")):
         data["photo"] = photo_path_or_url
-        return make_tg_request("sendPhoto", data=data)
+        res = make_tg_request("sendPhoto", data=data)
+        if res.get("ok"):
+            return res
+        # Fallback: Download image and upload multipart
+        try:
+            logger.info("⚠️ sendPhoto with URL failed, downloading photo for multipart upload...")
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            r_img = requests.get(photo_path_or_url, headers=headers, timeout=15)
+            if r_img.status_code == 200 and len(r_img.content) > 100:
+                files = {"photo": ("cover.jpg", r_img.content, "image/jpeg")}
+                data_copy = {k: v for k, v in data.items() if k != "photo"}
+                return make_tg_request("sendPhoto", data=data_copy, files=files)
+        except Exception as e:
+            logger.warning(f"Photo download fallback error: {e}")
+        return res
     elif os.path.exists(photo_path_or_url):
         f = open(photo_path_or_url, "rb")
         try:
