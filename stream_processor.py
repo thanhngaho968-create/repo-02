@@ -63,7 +63,8 @@ def parse_payload():
         "chat_id": os.environ.get("CHAT_ID", ""),
         "post_id": os.environ.get("POST_ID", ""),
         "folder_id": DRIVE_ROOT,
-        "owner_email": DEFAULT_OWNER_EMAIL
+        "owner_email": DEFAULT_OWNER_EMAIL,
+        "episodes": []
     }
 
     if TASK_PAYLOAD:
@@ -236,42 +237,31 @@ def scrape_123av_details(video_url):
 def update_gsheet_row(row_index, title=None, post_id=None, drive_link=None, status="Completed", ep_count=1, movie_code="", gdrive_files_count=None):
     """
     Updates Google Sheet Adult_18Plus tab directly from GitHub Actions runner (13 columns format).
+    Prioritizes Service Account (GDRIVE_SA_BASE64) for Google Sheets API.
     """
     if not row_index:
         return False
     sheet_id = os.environ.get("GSHEET_QUEUE_ID", "1qCYT9HV99mTkwyjL4EemqLeIGg_rZpKw0wH0yLl1IEQ")
     sa_b64 = os.environ.get("GDRIVE_SA_BASE64", "")
-    oauth_b64 = os.environ.get("GDRIVE_OAUTH_BASE64", "")
     try:
         import gspread
         import datetime
         from google.oauth2 import service_account
-        from google.oauth2.credentials import Credentials
 
         creds = None
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive"
         ]
-        if oauth_b64:
+        if sa_b64:
             try:
-                oauth_info = json.loads(base64.b64decode(oauth_b64).decode("utf-8"))
-                creds = Credentials(
-                    None,
-                    refresh_token=oauth_info["refresh_token"],
-                    token_uri="https://oauth2.googleapis.com/token",
-                    client_id=oauth_info["client_id"],
-                    client_secret=oauth_info["client_secret"],
-                    scopes=scopes
-                )
-            except Exception:
-                pass
-        if not creds and sa_b64:
-            try:
+                missing_padding = len(sa_b64) % 4
+                if missing_padding:
+                    sa_b64 += '=' * (4 - missing_padding)
                 sa_info = json.loads(base64.b64decode(sa_b64).decode("utf-8"))
                 creds = service_account.Credentials.from_service_account_info(sa_info, scopes=scopes)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Error loading SA for sheets: {e}")
 
         if not creds:
             logger.warning("⚠️ No Google Sheet credentials available.")
@@ -313,6 +303,7 @@ def update_gsheet_row(row_index, title=None, post_id=None, drive_link=None, stat
 def get_stream_m3u8_url(embed_url):
     """
     Fetches real .m3u8 stream URL from javplayer.cc embed URL.
+    Resolves sub-playlist to avoid 404 segments on master playlists.
     """
     if not embed_url:
         return None
@@ -333,24 +324,24 @@ def get_stream_m3u8_url(embed_url):
         'Accept': 'application/json, text/javascript, */*; q=0.01'
     }
 
-    if cloudscraper:
-        try:
-            scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "desktop": True})
-            r = scraper.get(stream_api_url, headers=req_headers, timeout=15)
-            if r.status_code == 200:
-                data = r.json()
-                stream_url = data.get("media", {}).get("stream") or data.get("url")
-                if stream_url:
-                    return stream_url
-        except Exception as ce:
-            logger.warning(f"cloudscraper failed for stream api: {ce}")
-
     try:
         r = requests.get(stream_api_url, headers=req_headers, timeout=15)
         if r.status_code == 200:
             data = r.json()
             stream_url = data.get("media", {}).get("stream") or data.get("url")
             if stream_url:
+                # If master playlist, resolve sub-playlist
+                if stream_url.endswith("video.m3u8") or "video.m3u8?" in stream_url:
+                    base_dir = stream_url.split("video.m3u8")[0]
+                    # Check qc/v.m3u8 or qb/v.m3u8
+                    for sub in ["qc/v.m3u8", "qd/v.m3u8", "qb/v.m3u8", "qa/v.m3u8"]:
+                        sub_url = f"{base_dir}{sub}"
+                        try:
+                            chk = requests.get(sub_url, headers=req_headers, timeout=5)
+                            if chk.status_code == 200 and "#EXTM3U" in chk.text:
+                                return sub_url
+                        except Exception:
+                            pass
                 return stream_url
     except Exception as e:
         logger.error(f"Error fetching stream m3u8 for hash {hash_id}: {e}")
@@ -359,33 +350,15 @@ def get_stream_m3u8_url(embed_url):
 
 def download_and_merge_m3u8(stream_url, output_mp4, referer="https://javplayer.cc/"):
     """
-    Downloads HLS stream with robust FFmpeg stream copy and yt-dlp.
+    Downloads HLS stream with multi-threaded yt-dlp and FFmpeg native stream copy.
     """
     logger.info(f"📥 Downloading stream to {output_mp4}...")
     
-    ffmpeg_cmd = [
-        'ffmpeg', '-y',
-        '-headers', f'Referer: {referer}\r\nUser-Agent: {HEADERS["User-Agent"]}\r\n',
-        '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
-        '-i', stream_url,
-        '-c', 'copy',
-        '-bsf:a', 'aac_adtstoasc',
-        output_mp4
-    ]
-    try:
-        logger.info("  Executing FFmpeg stream copy...")
-        res = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
-        if res.returncode == 0 and os.path.exists(output_mp4) and os.path.getsize(output_mp4) > 1024 * 100:
-            logger.info(f"✅ FFmpeg download success: {format_bytes(os.path.getsize(output_mp4))}")
-            return True
-        else:
-            logger.warning(f"⚠️ FFmpeg error: {res.stderr[-400:] if res.stderr else 'Failed'}")
-    except Exception as e:
-        logger.warning(f"⚠️ FFmpeg execution exception: {e}")
-
-    logger.info("⚠️ Trying yt-dlp fallback...")
+    # 1. Primary: yt-dlp -N 16
+    logger.info("🚀 Attempting multi-threaded yt-dlp download (-N 16)...")
     dl_cmd = [
         'yt-dlp',
+        '-N', '16',
         '--add-header', f'Referer: {referer}',
         '--add-header', f'User-Agent: {HEADERS["User-Agent"]}',
         '--downloader', 'ffmpeg',
@@ -399,9 +372,30 @@ def download_and_merge_m3u8(stream_url, output_mp4, referer="https://javplayer.c
             logger.info(f"✅ yt-dlp download success: {format_bytes(os.path.getsize(output_mp4))}")
             return True
         else:
-            logger.error(f"❌ yt-dlp error: {res.stderr[-300:] if res.stderr else 'No output'}")
+            logger.warning(f"⚠️ yt-dlp error: {res.stderr[-300:] if res.stderr else 'Failed'}")
     except Exception as e:
-        logger.error(f"❌ yt-dlp exception: {e}")
+        logger.warning(f"⚠️ yt-dlp exception: {e}")
+
+    # 2. Secondary Fallback: FFmpeg native stream copy
+    logger.info("⚠️ Trying FFmpeg stream copy fallback...")
+    ffmpeg_cmd = [
+        'ffmpeg', '-y',
+        '-headers', f'Referer: {referer}\r\nUser-Agent: {HEADERS["User-Agent"]}\r\n',
+        '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
+        '-i', stream_url,
+        '-c', 'copy',
+        '-bsf:a', 'aac_adtstoasc',
+        output_mp4
+    ]
+    try:
+        res = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+        if res.returncode == 0 and os.path.exists(output_mp4) and os.path.getsize(output_mp4) > 1024 * 100:
+            logger.info(f"✅ FFmpeg download success: {format_bytes(os.path.getsize(output_mp4))}")
+            return True
+        else:
+            logger.error(f"❌ FFmpeg error: {res.stderr[-400:] if res.stderr else 'Failed'}")
+    except Exception as e:
+        logger.error(f"❌ FFmpeg execution exception: {e}")
 
     return False
 
@@ -439,8 +433,8 @@ def get_discussion_thread_id(channel_msg_id, code=""):
                 latest_id = ping["result"]["message_id"]
                 telegram_helper.make_tg_request("deleteMessage", data={"chat_id": DISCUSS_CHAT_ID, "message_id": latest_id})
 
-                # Check backwards up to 12 messages
-                for test_id in range(latest_id - 1, max(1, latest_id - 14), -1):
+                # Check backwards up to 14 messages
+                for test_id in range(latest_id - 1, max(1, latest_id - 15), -1):
                     chk = telegram_helper.send_message(chat_id=DISCUSS_CHAT_ID, text="✓", reply_to_message_id=test_id)
                     if chk.get("ok"):
                         rep_msg = chk["result"]
@@ -691,58 +685,52 @@ def main():
     discuss_id = os.environ.get("DISCUSS_CHAT_ID", "-1002087114535")
 
     episodes_raw = data.get("episodes", [])
-    if not target_url and not m3u8_url and not episodes_raw:
-        logger.error("⚠️ No stream URL, page URL or episodes provided. Exiting gracefully.")
-        return
-
-    work_dir = os.path.join("./temp_downloads", f"task_{int(time.time())}")
-    os.makedirs(work_dir, exist_ok=True)
-
     episodes_to_process = []
     details = {}
 
-    if is_123av_url(target_url) and "/e/" not in target_url and not target_url.endswith(".m3u8"):
-        logger.info(f"🔍 Scraping 123AV details for: {target_url}")
-        details = scrape_123av_details(target_url)
-        if not details.get("error"):
-            title = details.get("title") or title
-            code = details.get("code") or code
-            eps = details.get("episodes", [])
-            for ep in eps:
-                ep_url = ep.get("url", "")
-                resolved_m3u8 = get_stream_m3u8_url(ep_url) if ("/e/" in ep_url and ".m3u8" not in ep_url) else ep_url
-                if resolved_m3u8:
-                    episodes_to_process.append({
-                        "name": ep.get("name", "1"),
-                        "number": ep.get("number", 1),
-                        "stream_url": resolved_m3u8
-                    })
-        else:
-            logger.warning(f"⚠️ Scraping failed: {details.get('error')}")
+    # 1. Primary: Use explicit episodes from payload if available
+    if episodes_raw:
+        logger.info(f"📋 Processing {len(episodes_raw)} explicit episodes from payload...")
+        for ep in episodes_raw:
+            ep_url = ep.get("stream_url") or ep.get("url") or ""
+            if ep_url:
+                episodes_to_process.append({
+                    "name": ep.get("name", str(ep.get("number", 1))),
+                    "number": ep.get("number", 1),
+                    "stream_url": ep_url
+                })
+    elif m3u8_url:
+        episodes_to_process.append({"name": "1", "number": 1, "stream_url": m3u8_url})
+    
+    # 2. Secondary Fallback: Scrape 123av if no explicit stream URLs were provided
+    if not episodes_to_process:
+        if is_123av_url(target_url) and "/e/" not in target_url and not target_url.endswith(".m3u8"):
+            logger.info(f"🔍 Scraping 123AV details for: {target_url}")
+            details = scrape_123av_details(target_url)
+            if not details.get("error"):
+                title = details.get("title") or title
+                code = details.get("code") or code
+                eps = details.get("episodes", [])
+                for ep in eps:
+                    ep_url = ep.get("url", "")
+                    resolved_m3u8 = get_stream_m3u8_url(ep_url) if ("/e/" in ep_url and ".m3u8" not in ep_url) else ep_url
+                    if resolved_m3u8:
+                        episodes_to_process.append({
+                            "name": ep.get("name", "1"),
+                            "number": ep.get("number", 1),
+                            "stream_url": resolved_m3u8
+                        })
+            else:
+                logger.warning(f"⚠️ Scraping failed: {details.get('error')}")
 
     if not episodes_to_process:
-        if episodes_raw:
-            for ep in episodes_raw:
-                ep_url = ep.get("stream_url") or ep.get("url") or ""
-                resolved = get_stream_m3u8_url(ep_url) if ("/e/" in ep_url and ".m3u8" not in ep_url) else ep_url
-                if resolved:
-                    episodes_to_process.append({
-                        "name": ep.get("name", str(ep.get("number", 1))),
-                        "number": ep.get("number", 1),
-                        "stream_url": resolved
-                    })
-        elif m3u8_url:
-            episodes_to_process.append({"name": "1", "number": 1, "stream_url": m3u8_url})
-        elif target_url:
-            resolved = get_stream_m3u8_url(target_url) if ("/e/" in target_url and ".m3u8" not in target_url) else target_url
-            if resolved:
-                episodes_to_process.append({"name": "1", "number": 1, "stream_url": resolved})
-
-    if not episodes_to_process:
-        logger.error("❌ No playable stream URLs could be extracted. Exiting.")
+        logger.error("❌ No playable stream URLs could be extracted. Exiting with error.")
         if row_index:
             update_gsheet_row(row_index, title=title, movie_code=code, status="Error (No Stream URL)")
-        return
+        sys.exit(1)
+
+    work_dir = os.path.join("./temp_downloads", f"task_{int(time.time())}")
+    os.makedirs(work_dir, exist_ok=True)
 
     channel_post_id = None
     disc_thread_id = None
@@ -810,6 +798,12 @@ def main():
         )
         if res:
             results.append(res)
+        else:
+            logger.error(f"❌ Failed processing stream for episode {ep_idx}")
+            shutil.rmtree(work_dir, ignore_errors=True)
+            if row_index:
+                update_gsheet_row(row_index, title=title, movie_code=code, status="Error (Stream Download Failed)")
+            sys.exit(1)
 
     if target_chat_id and target_reply_id and results:
         summary_msg = (
