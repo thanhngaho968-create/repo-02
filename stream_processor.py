@@ -27,7 +27,9 @@ TASK_ID = os.environ.get("TASK_ID", "task_stream_001")
 TASK_PAYLOAD = os.environ.get("TASK_PAYLOAD", "")
 DRIVE_ROOT = os.environ.get("GDRIVE_FOLDER_ID", "1AD83FFKXHHc-0NGK4boRv1jCcbUCRJn7")
 DEFAULT_OWNER_EMAIL = os.environ.get("OWNER_EMAIL", "hothihuong113@gmail.com")
-MAX_CHUNK_BYTES = 45 * 1024 * 1024  # 45 MB per video part (Strictly <= 50MB for Telegram API)
+TARGET_CHUNK_BYTES = int(38.0 * 1024 * 1024)  # 38.0 MB initial target chunk size
+MAX_ALLOWED_BYTES = int(43.5 * 1024 * 1024)   # 43.5 MB strict ceiling (<= 45.0 MB acceptance limit)
+MAX_CHUNK_BYTES = MAX_ALLOWED_BYTES
 
 CHANNEL_ID = os.environ.get("TARGET_CHANNEL_ID", "-1002244827586")
 DISCUSS_CHAT_ID = os.environ.get("DISCUSS_CHAT_ID", "-1002087114535")
@@ -423,16 +425,16 @@ def get_discussion_thread_id(channel_msg_id, code=""):
         logger.warning(f"Pinned message check warning: {e}")
 
     # Step 2: Probe backwards with retries for propagation delay
-    for attempt in range(1, 6):
-        time.sleep(2.5 + attempt * 0.5)
+    for attempt in range(1, 8):
+        time.sleep(2.0 + attempt * 0.5)
         try:
             ping = telegram_helper.send_message(chat_id=DISCUSS_CHAT_ID, text="🔍 Syncing...")
             if ping.get("ok"):
                 latest_id = ping["result"]["message_id"]
                 telegram_helper.make_tg_request("deleteMessage", data={"chat_id": DISCUSS_CHAT_ID, "message_id": latest_id})
 
-                # Check backwards up to 14 messages
-                for test_id in range(latest_id - 1, max(1, latest_id - 15), -1):
+                # Check backwards up to 30 messages
+                for test_id in range(latest_id - 1, max(1, latest_id - 30), -1):
                     chk = telegram_helper.send_message(chat_id=DISCUSS_CHAT_ID, text="✓", reply_to_message_id=test_id)
                     if chk.get("ok"):
                         rep_msg = chk["result"]
@@ -455,7 +457,7 @@ def get_discussion_thread_id(channel_msg_id, code=""):
                         if matched:
                             logger.info(f"🎯 [Tier 2] Resolved Discussion Thread Msg #{test_id} in {DISCUSS_CHAT_ID} for Channel Post #{channel_msg_id}")
                             return test_id
-                    time.sleep(0.15)
+                    time.sleep(0.12)
         except Exception as e:
             logger.warning(f"Discussion thread resolution attempt {attempt} error: {e}")
 
@@ -501,25 +503,29 @@ def generate_video_thumb(video_path, thumb_path, timestamp=2.0):
     subprocess.run(cmd, capture_output=True)
     return os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 0
 
-def split_video_lossless(input_mp4, output_dir, max_bytes=MAX_CHUNK_BYTES):
+def split_video_lossless(input_mp4, output_dir, max_bytes=MAX_ALLOWED_BYTES, target_bytes=TARGET_CHUNK_BYTES):
     """
     Splits video into streamable parts <= 45MB using FFmpeg lossless stream copy.
-    Automatically sub-slices any segments that exceed 45MB due to VBR bitrate spikes.
+    Guarantees 100% of all output parts are strictly <= max_bytes (43.5 MB) and <= 45.0 MB.
     """
     os.makedirs(output_dir, exist_ok=True)
     file_size = os.path.getsize(input_mp4)
     if file_size <= max_bytes:
-        return [input_mp4]
+        dest_p = os.path.join(output_dir, "part_001.mp4")
+        shutil.copy2(input_mp4, dest_p)
+        return [dest_p]
 
     meta = get_video_meta(input_mp4)
     duration = meta.get("duration", 0)
     if duration <= 0:
-        return [input_mp4]
+        dest_p = os.path.join(output_dir, "part_001.mp4")
+        shutil.copy2(input_mp4, dest_p)
+        return [dest_p]
 
-    num_parts = math.ceil(file_size / max_bytes)
-    segment_duration = max(30, int(duration / num_parts))
+    num_parts = math.ceil(file_size / target_bytes)
+    segment_duration = max(20, int(duration / num_parts))
 
-    out_pattern = os.path.join(output_dir, "init_part_%03d.mp4")
+    out_pattern = os.path.join(output_dir, "init_part_%04d.mp4")
     cmd = [
         "ffmpeg", "-y",
         "-i", input_mp4,
@@ -530,35 +536,36 @@ def split_video_lossless(input_mp4, output_dir, max_bytes=MAX_CHUNK_BYTES):
         "-reset_timestamps", "1",
         out_pattern
     ]
-    logger.info(f"✂️ Slicing video into ~{segment_duration}s streaming segments (target <= {max_bytes / (1024*1024):.1f} MB)...")
+    logger.info(f"✂️ Slicing video into ~{segment_duration}s streaming segments (target <= {target_bytes / (1024*1024):.1f} MB, ceiling <= {max_bytes / (1024*1024):.1f} MB)...")
     subprocess.run(cmd, capture_output=True)
 
-    initial_parts = sorted([
+    raw_parts = sorted([
         os.path.join(output_dir, f)
         for f in os.listdir(output_dir)
         if f.startswith("init_part_") and f.endswith(".mp4") and os.path.getsize(os.path.join(output_dir, f)) > 1024
     ])
 
-    final_parts = []
-    part_counter = 1
-    for init_p in initial_parts:
-        p_sz = os.path.getsize(init_p)
-        if p_sz <= max_bytes:
-            dest_p = os.path.join(output_dir, f"part_{part_counter:03d}.mp4")
-            os.rename(init_p, dest_p)
-            final_parts.append(dest_p)
-            part_counter += 1
-        else:
-            logger.warning(f"⚠️ Part {init_p} is {p_sz / (1024*1024):.1f} MB > {max_bytes / (1024*1024):.1f} MB, sub-slicing...")
-            sub_meta = get_video_meta(init_p)
-            sub_dur = sub_meta.get("duration", 0)
-            sub_num = math.ceil(p_sz / (max_bytes * 0.85))
-            sub_seg_dur = max(20, int(sub_dur / sub_num)) if sub_dur > 0 else 60
+    processed_parts = []
+    queue = list(raw_parts)
+    sub_counter = 0
 
-            sub_pattern = os.path.join(output_dir, f"sub_{part_counter}_%03d.mp4")
+    while queue:
+        p = queue.pop(0)
+        p_sz = os.path.getsize(p)
+        if p_sz <= max_bytes:
+            processed_parts.append(p)
+        else:
+            sub_counter += 1
+            logger.warning(f"⚠️ Segment {os.path.basename(p)} is {p_sz / (1024*1024):.1f} MB > {max_bytes / (1024*1024):.1f} MB, sub-slicing...")
+            sub_meta = get_video_meta(p)
+            sub_dur = sub_meta.get("duration", 0)
+            sub_parts_count = math.ceil(p_sz / target_bytes)
+            sub_seg_dur = max(10, int(sub_dur / sub_parts_count)) if sub_dur > 0 else 30
+
+            sub_pattern = os.path.join(output_dir, f"sub_{sub_counter}_%04d.mp4")
             sub_cmd = [
                 "ffmpeg", "-y",
-                "-i", init_p,
+                "-i", p,
                 "-c", "copy",
                 "-map", "0",
                 "-segment_time", str(sub_seg_dur),
@@ -567,21 +574,50 @@ def split_video_lossless(input_mp4, output_dir, max_bytes=MAX_CHUNK_BYTES):
                 sub_pattern
             ]
             subprocess.run(sub_cmd, capture_output=True)
-            try:
-                os.remove(init_p)
-            except Exception:
-                pass
 
             subs = sorted([
                 os.path.join(output_dir, f)
                 for f in os.listdir(output_dir)
-                if f.startswith(f"sub_{part_counter}_") and f.endswith(".mp4") and os.path.getsize(os.path.join(output_dir, f)) > 1024
+                if f.startswith(f"sub_{sub_counter}_") and f.endswith(".mp4") and os.path.getsize(os.path.join(output_dir, f)) > 1024
             ])
-            for s in subs:
-                dest_p = os.path.join(output_dir, f"part_{part_counter:03d}.mp4")
-                os.rename(s, dest_p)
-                final_parts.append(dest_p)
-                part_counter += 1
+
+            if len(subs) > 1:
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+                for s in reversed(subs):
+                    queue.insert(0, s)
+            else:
+                logger.warning(f"⚠️ Re-encoding oversized segment {os.path.basename(p)} ({p_sz / (1024*1024):.1f} MB) to ensure <= {max_bytes / (1024*1024):.1f} MB...")
+                re_p = os.path.join(output_dir, f"re_{sub_counter}.mp4")
+                re_cmd = [
+                    "ffmpeg", "-y",
+                    "-i", p,
+                    "-c:v", "libx264", "-crf", "26", "-preset", "fast",
+                    "-c:a", "aac", "-b:a", "128k",
+                    re_p
+                ]
+                subprocess.run(re_cmd, capture_output=True)
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+                if os.path.exists(re_p) and os.path.getsize(re_p) > 1024:
+                    if os.path.getsize(re_p) <= max_bytes:
+                        processed_parts.append(re_p)
+                    else:
+                        queue.insert(0, re_p)
+                elif subs:
+                    processed_parts.append(subs[0])
+
+    final_parts = []
+    for idx, p in enumerate(processed_parts, 1):
+        dest_p = os.path.join(output_dir, f"part_{idx:03d}.mp4")
+        if p != dest_p:
+            os.rename(p, dest_p)
+        final_parts.append(dest_p)
+        logger.info(f"  🧩 Part {idx}/{len(processed_parts)}: {format_bytes(os.path.getsize(dest_p))}")
 
     return final_parts
 
@@ -653,7 +689,7 @@ def process_single_stream(stream_url, work_dir, title, code, ep_num, total_eps, 
             
             # Robust retry loop per part
             sent_ok = False
-            for send_attempt in range(1, 7):
+            for send_attempt in range(1, 8):
                 res = telegram_helper.send_video(
                     chat_id=chat_id,
                     video_path=part_path,
@@ -675,6 +711,7 @@ def process_single_stream(stream_url, work_dir, title, code, ep_num, total_eps, 
 
             if not sent_ok:
                 logger.error(f"❌ Failed to send Part {p_idx}/{total_parts} after all retries!")
+                raise RuntimeError(f"Failed to send Part {p_idx}/{total_parts} after all retries!")
 
             # Immediate cleanup of part to conserve disk space
             try:
