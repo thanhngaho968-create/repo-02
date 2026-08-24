@@ -80,7 +80,8 @@ def get_drive_service():
     if oauth_info and oauth_info.get("refresh_token"):
         try:
             from google.oauth2.credentials import Credentials
-            logger.info("🔑 Authenticating Google Drive with User OAuth2 (5TB Direct Storage)...")
+            import google.auth.transport.requests
+            logger.info("🔑 Testing Google Drive User OAuth2 credentials...")
             creds = Credentials(
                 None,
                 refresh_token=oauth_info["refresh_token"],
@@ -89,10 +90,13 @@ def get_drive_service():
                 client_secret=oauth_info["client_secret"],
                 scopes=oauth_info.get("scopes", SCOPES)
             )
+            req = google.auth.transport.requests.Request()
+            creds.refresh(req)
             _drive_service = build("drive", "v3", credentials=creds)
+            logger.info("✅ Google Drive User OAuth2 authenticated successfully (5TB Direct Storage)!")
             return _drive_service
         except Exception as oe:
-            logger.warning(f"OAuth2 credentials build failed, falling back to Service Account: {oe}")
+            logger.warning(f"⚠️ OAuth2 credentials refresh failed ({oe}), falling back to Service Account...")
 
     # 2. Secondary Fallback: Service Account
     sa_info = None
@@ -133,6 +137,7 @@ def get_drive_service():
         scopes=SCOPES
     )
     _drive_service = build("drive", "v3", credentials=creds)
+    logger.info("✅ Authenticated Google Drive with Service Account!")
     return _drive_service
 
 def upload_file_to_drive(local_path, file_name, parent_folder_id=None, mime_type="video/mp4", owner_email=DEFAULT_OWNER_EMAIL):
@@ -148,15 +153,31 @@ def upload_file_to_drive(local_path, file_name, parent_folder_id=None, mime_type
     service = get_drive_service()
 
     def _run():
-        # DEDUPLICATION CHECK: Check if file with same name already exists
-        escaped_name = file_name.replace("'", "\\'")
-        q = f"'{target_folder}' in parents and name = '{escaped_name}' and trashed = false"
-        res = service.files().list(
-            q=q,
-            fields="files(id, name, webViewLink, size, trashed)",
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True
-        ).execute()
+        nonlocal service
+        try:
+            # DEDUPLICATION CHECK: Check if file with same name already exists
+            escaped_name = file_name.replace("'", "\\'")
+            q = f"'{target_folder}' in parents and name = '{escaped_name}' and trashed = false"
+            res = service.files().list(
+                q=q,
+                fields="files(id, name, webViewLink, size, trashed)",
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True
+            ).execute()
+        except Exception as auth_err:
+            logger.warning(f"⚠️ Drive query failed ({auth_err}), re-initializing service...")
+            global _drive_service
+            _drive_service = None
+            service = get_drive_service()
+            escaped_name = file_name.replace("'", "\\'")
+            q = f"'{target_folder}' in parents and name = '{escaped_name}' and trashed = false"
+            res = service.files().list(
+                q=q,
+                fields="files(id, name, webViewLink, size, trashed)",
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True
+            ).execute()
+
         existing_files = res.get("files", [])
         if existing_files:
             valid_files = [f for f in existing_files if int(f.get("size", 0)) > 1024 * 100]
