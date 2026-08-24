@@ -7,26 +7,22 @@ import logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-DISCUSS_CHAT_ID = os.environ.get("DISCUSS_CHAT_ID", "-1002087114535")
-FORBIDDEN_CHANNEL_ID = os.environ.get("TARGET_CHANNEL_ID", "-1002244827586")
+# STRICT GATEKEEPER CONSTANTS
+FORBIDDEN_CHANNEL_ID = os.environ.get("TARGET_CHANNEL_ID", "-1002244827586").strip()
+DISCUSS_CHAT_ID = os.environ.get("DISCUSS_CHAT_ID", "-1002087114535").strip()
 
 CF_RELAY_URL = os.environ.get("CF_RELAY_URL", "https://telegram-command-edge.hothihuong113.workers.dev").strip()
 CF_RELAY_SECRET = os.environ.get("CF_RELAY_SECRET", "HaRiSecret_2026_SecureRelay").strip()
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
 def make_tg_request(method, data=None, files=None, max_retries=5, timeout=300):
-    """
-    Sends request to Telegram API via Cloudflare Relay worker or direct Bot API with automatic retries.
-    Self-healing: if message to be replied is not found, automatically removes reply_to_message_id and retries.
-    """
-    # STRICT SECURITY BARRIER: NEVER ALLOW ANY VIDEO TO BE SENT TO MAIN BROADCAST CHANNEL
-    if method == "sendVideo" or (files and "video" in files):
-        if data and str(data.get("chat_id", "")).strip() == str(FORBIDDEN_CHANNEL_ID).strip():
-            logger.warning(f"🚨 [SECURITY BARRIER] Intercepted sendVideo targeted to Channel ({FORBIDDEN_CHANNEL_ID})! Redirecting to Discussion Supergroup ({DISCUSS_CHAT_ID})...")
+    # GATEKEEPER 2: ZERO VIDEO FILES IN CHANNEL BARRIER
+    if method == "sendVideo" or (files and ("video" in files or "thumbnail" in files)):
+        if data and str(data.get("chat_id", "")).strip() == str(FORBIDDEN_CHANNEL_ID):
+            logger.warning(f"🚨 [GATEKEEPER 2 INTERCEPTED] sendVideo to Channel ({FORBIDDEN_CHANNEL_ID}) blocked! Redirected to Discussion Supergroup ({DISCUSS_CHAT_ID}).")
             data["chat_id"] = DISCUSS_CHAT_ID
 
     for attempt in range(1, max_retries + 1):
-        # 1. Try Cloudflare Relay Worker if configured
         if CF_RELAY_URL:
             base_relay = CF_RELAY_URL.rstrip("/")
             url = f"{base_relay}/relay/{method}"
@@ -41,7 +37,7 @@ def make_tg_request(method, data=None, files=None, max_retries=5, timeout=300):
                     err_desc = res_json.get("description", "").lower()
                     if res_json.get("error_code") == 400 and ("message to be replied not found" in err_desc or "reply_to_message" in err_desc):
                         target_chat = data.get("chat_id") if data else "target"
-                        logger.warning(f"⚠️ [Self-Healing] reply_to_message_id not found in {target_chat}! Stripping reply ID and reposting directly...")
+                        logger.warning(f"⚠️ [GATEKEEPER 3 Self-Healing] reply_to_message_id not found in {target_chat}! Reposting directly to discussion group...")
                         if data and "reply_to_message_id" in data:
                             del data["reply_to_message_id"]
                             return make_tg_request(method, data=data, files=files, max_retries=max_retries - attempt + 1, timeout=timeout)
@@ -60,7 +56,6 @@ def make_tg_request(method, data=None, files=None, max_retries=5, timeout=300):
             except Exception as e:
                 logger.warning(f"[Relay Attempt {attempt}/{max_retries}] Exception on {method}: {e}")
 
-        # 2. Direct Telegram API fallback
         if BOT_TOKEN:
             url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
             try:
@@ -73,7 +68,7 @@ def make_tg_request(method, data=None, files=None, max_retries=5, timeout=300):
                     err_desc = res_json.get("description", "").lower()
                     if res_json.get("error_code") == 400 and ("message to be replied not found" in err_desc or "reply_to_message" in err_desc):
                         target_chat = data.get("chat_id") if data else "target"
-                        logger.warning(f"⚠️ [Self-Healing Direct] reply_to_message_id not found in {target_chat}! Stripping reply ID and reposting directly...")
+                        logger.warning(f"⚠️ [GATEKEEPER 3 Self-Healing] reply_to_message_id not found in {target_chat}! Reposting directly to discussion group...")
                         if data and "reply_to_message_id" in data:
                             del data["reply_to_message_id"]
                             return make_tg_request(method, data=data, files=files, max_retries=max_retries - attempt + 1, timeout=timeout)
@@ -129,9 +124,9 @@ def send_video(chat_id, video_path, caption="", thumb_path=None, duration=0, wid
     if not os.path.exists(video_path):
         return {"ok": False, "error": f"Video file not found: {video_path}"}
 
-    # STRICT SECURITY BARRIER: Force video destination to Discussion Group only
-    if str(chat_id).strip() == str(FORBIDDEN_CHANNEL_ID).strip():
-        logger.warning(f"🚨 [SECURITY BARRIER] Blocked send_video to Channel! Forcing chat_id to {DISCUSS_CHAT_ID}")
+    # GATEKEEPER 2: FORBIDDEN CHANNEL VIDEO BARRIER
+    if str(chat_id).strip() == str(FORBIDDEN_CHANNEL_ID):
+        logger.warning(f"🚨 [GATEKEEPER 2 BARRIER] Intercepted send_video to Channel! Forcing chat_id to {DISCUSS_CHAT_ID}")
         chat_id = DISCUSS_CHAT_ID
 
     data = {
@@ -172,6 +167,13 @@ def send_video(chat_id, video_path, caption="", thumb_path=None, duration=0, wid
 def send_document(chat_id, doc_path, caption="", thumb_path=None, reply_to_message_id=None):
     if not os.path.exists(doc_path):
         return {"ok": False, "error": f"Document file not found: {doc_path}"}
+
+    # GATEKEEPER 2: Video documents blocked from channel
+    if str(chat_id).strip() == str(FORBIDDEN_CHANNEL_ID):
+        ext = os.path.splitext(doc_path)[1].lower()
+        if ext in [".mp4", ".mkv", ".avi", ".ts", ".mov", ".flv"]:
+            logger.warning(f"🚨 [GATEKEEPER 2 BARRIER] Intercepted video document {doc_path} to Channel! Redirecting to {DISCUSS_CHAT_ID}")
+            chat_id = DISCUSS_CHAT_ID
 
     data = {
         "chat_id": chat_id,
