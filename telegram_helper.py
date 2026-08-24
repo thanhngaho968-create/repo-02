@@ -10,13 +10,14 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 DISCUSS_CHAT_ID = os.environ.get("DISCUSS_CHAT_ID", "-1002087114535")
 FORBIDDEN_CHANNEL_ID = os.environ.get("TARGET_CHANNEL_ID", "-1002244827586")
 
-CF_RELAY_URL = os.environ.get("CF_RELAY_URL", "").strip()
-CF_RELAY_SECRET = os.environ.get("CF_RELAY_SECRET", "").strip()
+CF_RELAY_URL = os.environ.get("CF_RELAY_URL", "https://telegram-command-edge.hothihuong113.workers.dev").strip()
+CF_RELAY_SECRET = os.environ.get("CF_RELAY_SECRET", "HaRiSecret_2026_SecureRelay").strip()
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
 def make_tg_request(method, data=None, files=None, max_retries=5, timeout=300):
     """
     Sends request to Telegram API via Cloudflare Relay worker or direct Bot API with automatic retries.
+    Self-healing: if message to be replied is not found, automatically removes reply_to_message_id and retries.
     """
     # STRICT SECURITY BARRIER: NEVER ALLOW ANY VIDEO TO BE SENT TO MAIN BROADCAST CHANNEL
     if method == "sendVideo" or (files and "video" in files):
@@ -27,16 +28,33 @@ def make_tg_request(method, data=None, files=None, max_retries=5, timeout=300):
     for attempt in range(1, max_retries + 1):
         # 1. Try Cloudflare Relay Worker if configured
         if CF_RELAY_URL:
-            url = f"{CF_RELAY_URL.rstrip('/')}/relay/{method}"
+            url = f"{CF_RELAY_URL.rstrip("/")}/relay/{method}"
             headers = {"X-Relay-Secret": CF_RELAY_SECRET} if CF_RELAY_SECRET else {}
             try:
                 res = requests.post(url, headers=headers, data=data, files=files, timeout=timeout)
-                if res.status_code == 200:
-                    try:
-                        return res.json()
-                    except Exception:
-                        pass
-                logger.warning(f"[Relay] Status {res.status_code} on {method}: {res.text[:200]}")
+                try:
+                    res_json = res.json()
+                    if res_json.get("ok"):
+                        return res_json
+                    
+                    err_desc = res_json.get("description", "").lower()
+                    if res_json.get("error_code") == 400 and ("message to be replied not found" in err_desc or "reply_to_message" in err_desc):
+                        logger.warning(f"⚠️ [Self-Healing] reply_to_message_id not found in {data.get("chat_id")}! Stripping reply ID and reposting directly...")
+                        if data and "reply_to_message_id" in data:
+                            del data["reply_to_message_id"]
+                            return make_tg_request(method, data=data, files=files, max_retries=max_retries - attempt + 1, timeout=timeout)
+
+                    if res_json.get("error_code") == 429:
+                        retry_after = res_json.get("parameters", {}).get("retry_after", 5)
+                        logger.warning(f"Telegram Rate Limit (429). Sleeping {retry_after}s...")
+                        time.sleep(retry_after)
+                        continue
+
+                    logger.warning(f"[Relay Attempt {attempt}/{max_retries}] API Error on {method}: {res_json}")
+                except Exception:
+                    if res.status_code == 200:
+                        return {"ok": True}
+                    logger.warning(f"[Relay Attempt {attempt}/{max_retries}] Non-JSON Response: {res.text[:200]}")
             except Exception as e:
                 logger.warning(f"[Relay Attempt {attempt}/{max_retries}] Exception on {method}: {e}")
 
@@ -49,6 +67,14 @@ def make_tg_request(method, data=None, files=None, max_retries=5, timeout=300):
                     res_json = res.json()
                     if res_json.get("ok"):
                         return res_json
+                    
+                    err_desc = res_json.get("description", "").lower()
+                    if res_json.get("error_code") == 400 and ("message to be replied not found" in err_desc or "reply_to_message" in err_desc):
+                        logger.warning(f"⚠️ [Self-Healing Direct] reply_to_message_id not found in {data.get("chat_id")}! Stripping reply ID and reposting directly...")
+                        if data and "reply_to_message_id" in data:
+                            del data["reply_to_message_id"]
+                            return make_tg_request(method, data=data, files=files, max_retries=max_retries - attempt + 1, timeout=timeout)
+
                     if res_json.get("error_code") == 429:
                         retry_after = res_json.get("parameters", {}).get("retry_after", 5)
                         logger.warning(f"Telegram Rate Limit (429). Sleeping {retry_after}s...")
