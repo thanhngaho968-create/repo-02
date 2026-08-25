@@ -311,6 +311,21 @@ def update_gsheet_row(row_index, title=None, post_id=None, drive_link=None, stat
         logger.warning(f"⚠️ GSheet update warning: {e}")
         return False
 
+def resolve_sub_playlist(stream_url, req_headers):
+    if not stream_url:
+        return stream_url
+    if stream_url.endswith("video.m3u8") or "video.m3u8?" in stream_url:
+        base_dir = stream_url.split("video.m3u8")[0]
+        for sub in ["qc/v.m3u8", "qd/v.m3u8", "qb/v.m3u8", "qa/v.m3u8"]:
+            sub_url = f"{base_dir}{sub}"
+            try:
+                chk = requests.get(sub_url, headers=req_headers, timeout=5)
+                if chk.status_code == 200 and "#EXTM3U" in chk.text:
+                    return sub_url
+            except Exception:
+                pass
+    return stream_url
+
 def get_stream_m3u8_url(embed_url):
     """
     Fetches real .m3u8 stream URL from javplayer.cc embed URL.
@@ -319,43 +334,65 @@ def get_stream_m3u8_url(embed_url):
     if not embed_url:
         return None
 
-    if embed_url.endswith(".m3u8") or ".m3u8?" in embed_url:
-        return embed_url
+    clean_embed = embed_url.replace(r"\/", "/").replace("\\", "").strip()
 
-    m_hid = re.search(r'/e/([a-zA-Z0-9_-]+)', embed_url)
+    if clean_embed.endswith(".m3u8") or ".m3u8?" in clean_embed:
+        return clean_embed
+
+    m_hid = re.search(r'/e/([a-zA-Z0-9_-]+)', clean_embed)
     if not m_hid:
-        return embed_url
+        return clean_embed
 
     hash_id = m_hid.group(1)
     stream_api_url = f"https://javplayer.cc/stream?id={hash_id}"
     req_headers = {
         'User-Agent': HEADERS['User-Agent'],
-        'Referer': embed_url if embed_url.startswith("http") else f"https://javplayer.cc/e/{hash_id}",
+        'Referer': f"https://javplayer.cc/e/{hash_id}",
         'X-Requested-With': 'XMLHttpRequest',
         'Accept': 'application/json, text/javascript, */*; q=0.01'
     }
 
+    # 1. cloudscraper
+    if cloudscraper:
+        try:
+            scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "desktop": True})
+            r = scraper.get(stream_api_url, headers=req_headers, timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+                stream_url = data.get("media", {}).get("stream") or data.get("url")
+                if stream_url:
+                    return resolve_sub_playlist(stream_url, req_headers)
+        except Exception as e:
+            logger.warning(f"cloudscraper stream api warning: {e}")
+
+    # 2. requests
     try:
         r = requests.get(stream_api_url, headers=req_headers, timeout=15)
         if r.status_code == 200:
             data = r.json()
             stream_url = data.get("media", {}).get("stream") or data.get("url")
             if stream_url:
-                # If master playlist, resolve sub-playlist
-                if stream_url.endswith("video.m3u8") or "video.m3u8?" in stream_url:
-                    base_dir = stream_url.split("video.m3u8")[0]
-                    # Check qc/v.m3u8 or qb/v.m3u8
-                    for sub in ["qc/v.m3u8", "qd/v.m3u8", "qb/v.m3u8", "qa/v.m3u8"]:
-                        sub_url = f"{base_dir}{sub}"
-                        try:
-                            chk = requests.get(sub_url, headers=req_headers, timeout=5)
-                            if chk.status_code == 200 and "#EXTM3U" in chk.text:
-                                return sub_url
-                        except Exception:
-                            pass
-                return stream_url
+                return resolve_sub_playlist(stream_url, req_headers)
     except Exception as e:
-        logger.error(f"Error fetching stream m3u8 for hash {hash_id}: {e}")
+        logger.warning(f"requests stream api warning: {e}")
+
+    # 3. curl fallback
+    try:
+        curl_cmd = [
+            'curl', '-s', '-4', '--max-time', '15',
+            '-H', f'User-Agent: {HEADERS["User-Agent"]}',
+            '-H', f'Referer: https://javplayer.cc/e/{hash_id}',
+            '-H', 'X-Requested-With: XMLHttpRequest',
+            stream_api_url
+        ]
+        res = subprocess.run(curl_cmd, capture_output=True, text=True)
+        if res.returncode == 0 and res.stdout:
+            data = json.loads(res.stdout)
+            stream_url = data.get("media", {}).get("stream") or data.get("url")
+            if stream_url:
+                return resolve_sub_playlist(stream_url, req_headers)
+    except Exception as e:
+        logger.error(f"curl stream api fallback error: {e}")
 
     return None
 
@@ -780,13 +817,19 @@ def main():
         for ep in episodes_raw:
             ep_url = ep.get("stream_url") or ep.get("url") or ""
             if ep_url:
-                episodes_to_process.append({
-                    "name": ep.get("name", str(ep.get("number", 1))),
-                    "number": ep.get("number", 1),
-                    "stream_url": ep_url
-                })
+                clean_ep_url = ep_url.replace(r"\/", "/").replace("\\", "").strip()
+                resolved_m3u8 = get_stream_m3u8_url(clean_ep_url) if ("/e/" in clean_ep_url and ".m3u8" not in clean_ep_url) else clean_ep_url
+                if resolved_m3u8:
+                    episodes_to_process.append({
+                        "name": ep.get("name", str(ep.get("number", 1))),
+                        "number": ep.get("number", 1),
+                        "stream_url": resolved_m3u8
+                    })
     elif m3u8_url:
-        episodes_to_process.append({"name": "1", "number": 1, "stream_url": m3u8_url})
+        clean_m3u8 = m3u8_url.replace(r"\/", "/").replace("\\", "").strip()
+        resolved = get_stream_m3u8_url(clean_m3u8) if ("/e/" in clean_m3u8 and ".m3u8" not in clean_m3u8) else clean_m3u8
+        if resolved:
+            episodes_to_process.append({"name": "1", "number": 1, "stream_url": resolved})
     
     # 2. Secondary Fallback: Scrape 123av if no explicit stream URLs were provided
     if not episodes_to_process:
