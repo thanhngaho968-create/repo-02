@@ -223,6 +223,15 @@ def scrape_123av_details(video_url):
                     "url": iframe["src"]
                 })
 
+        if not cover_url and episodes:
+            for ep in episodes:
+                ep_u = ep.get("url", "")
+                m_post = re.search(r'poster=([^&]+)', ep_u)
+                if m_post:
+                    import urllib.parse
+                    cover_url = urllib.parse.unquote(m_post.group(1)).replace("/s500/", "/")
+                    break
+
         return {
             "title": title,
             "code": code,
