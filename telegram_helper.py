@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] [Tel
 DEFAULT_CC_TOKEN = "8798886722:AAFLRQwdonCZIJXuvGm9NbvyyVlETxsWjYw"
 NWL_FORBIDDEN_PREFIX = "8944836049"
 
-CF_RELAY_URL = os.environ.get("CF_RELAY_URL", "https://telegram-command-edge.hothihuong113.workers.dev").strip()
+CF_RELAY_URL = os.environ.get("CF_RELAY_URL", "https://telegram-command-edge.hari-edge.workers.dev").strip()
 CF_RELAY_SECRET = os.environ.get("CF_RELAY_SECRET", "HaRiSecret_2026_SecureRelay").strip()
 
 RAW_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip() or DEFAULT_CC_TOKEN
