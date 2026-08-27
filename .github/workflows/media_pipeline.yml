@@ -65,8 +65,18 @@ jobs:
         run: |
           pip install -r requirements.txt
 
+      - name: Restore YouTube Cookies
+        env:
+          YT_COOKIES_BASE64: ${{ secrets.YT_COOKIES_BASE64 }}
+        run: |
+          if [ -n "$YT_COOKIES_BASE64" ]; then
+            echo "$YT_COOKIES_BASE64" | base64 -d > cookies.txt
+            echo "✅ cookies.txt restored from secret (size: $(wc -c < cookies.txt) bytes)"
+          fi
+
       - name: Execute Unified Media Processor
         env:
+          YT_COOKIES_BASE64: ${{ secrets.YT_COOKIES_BASE64 }}
           GDRIVE_OAUTH_BASE64: ${{ secrets.GDRIVE_OAUTH_BASE64 }}
           GDRIVE_SA_BASE64: ${{ secrets.GDRIVE_SA_BASE64 }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
