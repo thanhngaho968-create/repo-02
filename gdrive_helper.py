@@ -3,6 +3,7 @@ runners/gdrive_helper.py - Google Drive v3 Integration for Cloud Runners
 """
 
 import logging
+from googleapiclient.discovery import build
 from runners.gdrive_submodules.auth import (
     DEFAULT_OWNER_EMAIL,
     DEFAULT_DRIVE_FOLDER_ID,
@@ -20,6 +21,8 @@ from runners.gdrive_submodules.upload_ops import (
 
 logger = logging.getLogger(__name__)
 
+_drive_service = None
+
 __all__ = [
     "DEFAULT_OWNER_EMAIL",
     "DEFAULT_DRIVE_FOLDER_ID",
@@ -29,4 +32,6 @@ __all__ = [
     "find_drive_folder",
     "create_drive_folder",
     "upload_file_to_drive",
+    "build",
+    "_drive_service",
 ]
