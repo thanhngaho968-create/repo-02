@@ -43,23 +43,22 @@ jobs:
           restore-keys: |
             media-tools-${{ runner.os }}-
 
-      - name: Ensure Media Processing Tools (yt-dlp & ffmpeg)
+      - name: Ensure Media Processing Tools (yt-dlp, aria2 & ffmpeg)
         run: |
           mkdir -p ~/.local/bin
           export PATH="$HOME/.local/bin:$PATH"
-          if ! command -v yt-dlp &> /dev/null && [ ! -f "$HOME/.local/bin/yt-dlp" ]; then
-            echo "📥 Downloading latest yt-dlp binary..."
-            curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/.local/bin/yt-dlp
-            chmod +x ~/.local/bin/yt-dlp
-          fi
-          if ! command -v ffmpeg &> /dev/null; then
-            echo "📥 Installing FFmpeg..."
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq ffmpeg
-          fi
+          echo "📥 Downloading latest yt-dlp binary..."
+          curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/.local/bin/yt-dlp
+          chmod +x ~/.local/bin/yt-dlp
+          
+          echo "📥 Installing FFmpeg & aria2..."
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg aria2
+          
           echo "$HOME/.local/bin" >> $GITHUB_PATH
           ~/.local/bin/yt-dlp --version || yt-dlp --version
           ffmpeg -version | head -n 1
+          aria2c --version | head -n 1
 
       - name: Install Python Dependencies
         run: |
@@ -76,6 +75,7 @@ jobs:
 
       - name: Execute Unified Media Processor
         env:
+          PYTHONPATH: "."
           YT_COOKIES_BASE64: ${{ secrets.YT_COOKIES_BASE64 }}
           GDRIVE_OAUTH_BASE64: ${{ secrets.GDRIVE_OAUTH_BASE64 }}
           GDRIVE_SA_BASE64: ${{ secrets.GDRIVE_SA_BASE64 }}
@@ -89,4 +89,4 @@ jobs:
           RUNNER_REPO: ${{ github.repository }}
           RUNNER_RUN_ID: ${{ github.run_id }}
         run: |
-          python3 media_processor.py
+          python3 -u media_processor.py
